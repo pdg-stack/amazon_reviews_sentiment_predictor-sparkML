@@ -11,7 +11,7 @@ latency, not a high-throughput production pattern (see ARCHITECTURE.md).
 Every /predict call is logged as a JSON line to logs/api_requests.log.
 
 The model expects a `review_text` field (title + body combined, see
-preprocess.py/model_plan.md) -- /predict accepts an optional `title`/`titles`
+preprocess.py/docs/model_plan.md) -- /predict accepts an optional `title`/`titles`
 alongside `text`/`texts` and combines them the same way, so a request run
 through this endpoint sees exactly what the model was trained on.
 

@@ -24,7 +24,7 @@ ACTIVE_MODEL_MANIFEST = ACTIVE_MODEL_DIR / "ACTIVE_MODEL.json"
 REPORTS_DIR = PROJECT_ROOT / "reports"
 LOGS_DIR = PROJECT_ROOT / "logs"
 MLRUNS_DIR = PROJECT_ROOT / "mlruns"  # artifact storage (model files, etc.)
-MLFLOW_DB_PATH = PROJECT_ROOT / "mlflow.db"  # run/metric/registry metadata
+MLFLOW_DB_PATH = MLRUNS_DIR / "mlflow.db"  # run/metric/registry metadata -- kept alongside the artifacts it describes, not loose at the project root
 
 # A plain file-store tracking URI (file:./mlruns) can't back the Model
 # Registry (registered_model_name=, get_model_version(), models:/name/N URIs

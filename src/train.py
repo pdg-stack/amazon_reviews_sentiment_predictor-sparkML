@@ -4,7 +4,7 @@ Trains the Amazon Reviews sentiment classifier.
 This script is intentionally verbose and heavily commented -- the goal is
 that someone new to Spark ML pipelines can read the printed output and the
 comments here and understand not just *what* each step does, but *why* it's
-there. See model_plan.md for the full narrative version of this reasoning.
+there. See docs/model_plan.md for the full narrative version of this reasoning.
 
 What happens when you run this script:
   1. Load data/processed/train.parquet (polarity {1,2} was already mapped

@@ -2,7 +2,7 @@
 
 A containerized PySpark project that explores the [Amazon Reviews](https://www.kaggle.com/datasets/kritanjalijain/amazon-reviews) dataset, tunes and trains a sentiment-classification model (Spark MLlib, with k-fold cross-validation and hyperparameter search tracked in MLflow), evaluates it with charts, and serves it both as a batch job and a secured real-time API.
 
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) for how the pieces fit together, and [`model_plan.md`](model_plan.md) for why the modeling pipeline is built the way it is.
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for how the pieces fit together, and [`docs/model_plan.md`](docs/model_plan.md) for why the modeling pipeline is built the way it is.
 
 **Data is never committed to this repo** — you download your own copy locally (see below).
 
@@ -40,7 +40,7 @@ Neither notebook is called automatically by any script — open and run them you
 ## 5. Compare versions, then pick one to serve
 `train.py` never changes what's "live" — it only registers a new version in MLflow. Before deciding, score any specific version against the held-out test set directly (doesn't touch `models/active/`):
 ```
-mlflow ui --port 5000 --backend-store-uri sqlite:///mlflow.db   # browse runs, metrics, and registered versions in a browser
+mlflow ui --port 5000 --backend-store-uri sqlite:///mlruns/mlflow.db   # browse runs, metrics, and registered versions in a browser
 python src/evaluate.py --version 1   # metrics + charts -> reports/version_1/
 python src/evaluate.py --version 2   # metrics + charts -> reports/version_2/
 ```
