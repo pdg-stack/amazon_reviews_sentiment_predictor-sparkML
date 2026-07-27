@@ -1,0 +1,3 @@
+Place your Kaggle API token here as a plain-text file named access_token
+(Kaggle.com -> Settings -> API -> Create New Token). This folder's contents
+(other than this file) are gitignored -- never commit real credentials.

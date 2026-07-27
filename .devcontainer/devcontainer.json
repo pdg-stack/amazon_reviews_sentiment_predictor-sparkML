@@ -1,0 +1,24 @@
+{
+  "name": "amazon-reviews-sentiment-predictor-sparkml",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "mounts": [
+    "source=${localWorkspaceFolder}/.kaggle,target=/root/.kaggle,type=bind"
+  ],
+  "forwardPorts": [4040, 8000, 5000],
+  "portsAttributes": {
+    "4040": { "label": "Spark UI" },
+    "8000": { "label": "FastAPI" },
+    "5000": { "label": "MLflow UI" }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-toolsai.jupyter"
+      ]
+    }
+  }
+}

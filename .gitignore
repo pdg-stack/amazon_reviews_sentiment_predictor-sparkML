@@ -1,0 +1,24 @@
+# Data (never commit the dataset itself)
+data/
+
+# Trained models, tracking, reports, logs -- all runtime-generated
+models/
+mlruns/
+mlflow.db*
+reports/
+logs/
+
+# Secrets (keep the folder + its placeholder note, ignore only the real token)
+.kaggle/*
+!.kaggle/.gitkeep
+.env
+
+# Notebooks / Python
+notebooks/.ipynb_checkpoints/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Spark
+spark-warehouse/
+derby.log
