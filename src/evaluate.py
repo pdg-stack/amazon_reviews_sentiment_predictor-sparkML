@@ -25,6 +25,8 @@ each other):
 """
 
 import argparse
+import datetime
+import json
 
 import matplotlib
 
@@ -187,7 +189,24 @@ def main(version: int | None = None):
     plot_confusion_matrix(predictions, out_dir / "confusion_matrix.png")
     plot_roc_curve(predictions, auc, out_dir / "roc_curve.png")
     plot_tuning_improvement(out_dir / "tuning_improvement.png")
-    print(f"Charts written to {out_dir}")
+
+    # Persisted (not just printed) so a separate script can later compare
+    # several versions' test-set metrics side by side without re-scoring.
+    metrics_path = out_dir / "metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "version": version if version is not None else "active",
+                "model_uri": model_uri,
+                "accuracy": accuracy,
+                "f1": f1,
+                "auc": auc,
+                "evaluated_at": datetime.datetime.now().isoformat(),
+            },
+            indent=2,
+        )
+    )
+    print(f"Charts + metrics.json written to {out_dir}")
 
     spark.stop()
     return accuracy, f1, auc

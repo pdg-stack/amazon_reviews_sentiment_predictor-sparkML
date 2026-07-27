@@ -48,11 +48,16 @@ def get_spark_session(app_name: str = "amazon-reviews-sentiment") -> SparkSessio
 
     local[*] uses all CPU cores available to the container -- there's no
     cluster here, just a single container, so this is the right mode for
-    this project.
+    this project. In local mode the driver and executor share one JVM, so
+    spark.driver.memory is the only heap that matters. The 1g default was
+    fine for train.py's --sample-fraction runs but OOM'd evaluate.py/
+    predict.py against the full, un-sampled 400K-row test set -- 2g gives
+    enough headroom for that on this container's ~3.8GB total allocation.
     """
     return (
         SparkSession.builder.appName(app_name)
         .master("local[*]")
+        .config("spark.driver.memory", "2g")
         .config("spark.sql.shuffle.partitions", "8")  # small container, no need for Spark's 200-partition default
         .getOrCreate()
     )

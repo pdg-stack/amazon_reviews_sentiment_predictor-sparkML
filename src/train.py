@@ -106,7 +106,7 @@ def evaluate_split(model, df):
     return accuracy, f1, auc
 
 
-def main(sample_fraction: float | None = None) -> None:
+def main(sample_fraction: float | None = None, cv_folds: int = 5) -> None:
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment("amazon_review_sentiment")
 
@@ -138,6 +138,7 @@ def main(sample_fraction: float | None = None) -> None:
     with mlflow.start_run(run_name="train_run"):
         mlflow.log_param("sample_fraction", sample_fraction if sample_fraction is not None else 1.0)
         mlflow.log_param("input_field", "review_text (title + body)")
+        mlflow.log_param("cv_folds", cv_folds)
 
         # --- Baseline: default hyperparameters, no tuning. This is the
         # "before" side of the before/after tuning-improvement chart in
@@ -159,9 +160,12 @@ def main(sample_fraction: float | None = None) -> None:
             print(f"Baseline -> accuracy={b_acc:.4f} f1={b_f1:.4f} auc={b_auc:.4f}")
 
         # --- Hyperparameter tuning: k-fold cross-validation over a small
-        # grid. Each combination is evaluated on 5 folds of train_split;
-        # CrossValidator returns the refit winner plus every candidate's
-        # average metric (cv_model.avgMetrics, aligned with param_grid). ---
+        # grid. Each combination is evaluated on cv_folds folds of
+        # train_split; CrossValidator returns the refit winner plus every
+        # candidate's average metric (cv_model.avgMetrics, aligned with
+        # param_grid). Fewer folds = a noisier but cheaper estimate per
+        # candidate -- useful to know when comparing runs at different
+        # cv_folds settings (see MODEL_HISTORY.md). ---
         param_grid = (
             ParamGridBuilder()
             .addGrid(hashing_tf.numFeatures, [2**16, 2**18])
@@ -173,14 +177,14 @@ def main(sample_fraction: float | None = None) -> None:
             estimator=pipeline,
             estimatorParamMaps=param_grid,
             evaluator=BinaryClassificationEvaluator(labelCol="label", metricName="areaUnderROC"),
-            numFolds=5,
+            numFolds=cv_folds,
             parallelism=2,
             seed=42,
         )
 
         print(
-            f"\nRunning 5-fold cross-validation over {len(param_grid)} hyperparameter "
-            f"combinations ({5 * len(param_grid)} model fits total -- use --sample-fraction "
+            f"\nRunning {cv_folds}-fold cross-validation over {len(param_grid)} hyperparameter "
+            f"combinations ({cv_folds * len(param_grid)} model fits total -- use --sample-fraction "
             "for a quick test run) ..."
         )
         cv_model = cv.fit(train_split)
@@ -235,5 +239,11 @@ if __name__ == "__main__":
             "full dataset, for fast iteration."
         ),
     )
+    parser.add_argument(
+        "--cv-folds",
+        type=int,
+        default=5,
+        help="Number of cross-validation folds (default: 5). Fewer folds = cheaper but noisier tuning.",
+    )
     args = parser.parse_args()
-    main(sample_fraction=args.sample_fraction)
+    main(sample_fraction=args.sample_fraction, cv_folds=args.cv_folds)
