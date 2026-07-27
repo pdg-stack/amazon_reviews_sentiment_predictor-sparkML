@@ -1,6 +1,6 @@
 # Model Version History
 
-Tracks what changed between registered model versions and why, plus their held-out test-set results. Metrics come from `python src/evaluate.py --version N` (writes `reports/version_N/metrics.json`); the comparison chart comes from `python src/compare_versions.py --versions 1 2 3` (`reports/model_comparison.png`, not committed -- regenerate it locally).
+Tracks what changed between registered model versions and why, plus their held-out test-set results. Metrics come from `python src/evaluate.py --version N` (writes `reports/version_N/metrics.json` + `confusion_matrix.png`/`roc_curve.png`, embedded below); the comparison chart comes from `python src/compare_versions.py --versions 1 2 3` (`reports/model_comparison.png`). All of `reports/` is committed so these images render here and stay in sync with the numbers -- regenerate them locally after retraining rather than hand-editing.
 
 ## Results (held-out test set, never used for training/tuning/validation)
 
@@ -12,6 +12,8 @@ Tracks what changed between registered model versions and why, plus their held-o
 
 **Active model: v3.**
 
+![Model version comparison: accuracy, F1, AUC per version](../reports/model_comparison.png)
+
 ## What changed between versions, and why
 
 ### v1 -> v2: add the review title as model input
@@ -22,6 +24,24 @@ v3 doubled the training sample (5% -> 10% of the 3.6M-row training set) while cu
 
 ### Why the test set (not just validation) decided each promotion
 Every version's validation-split numbers looked good, but the promotion decision was always confirmed against `test.parquet` -- data never touched during training, tuning, or the validation check -- via `evaluate.py --version N`, to rule out CV/validation-split optimism before changing what the API serves.
+
+## Per-version diagnostics (test set)
+`tuning_improvement.png` is intentionally not repeated here per version -- it always reflects whichever `train.py` run was most recent at the time `evaluate.py` happened to run (see its docstring), so it doesn't line up 1:1 with a specific version and would be misleading presented that way.
+
+### v1
+| Confusion matrix | ROC curve |
+|---|---|
+| ![v1 confusion matrix](../reports/version_1/confusion_matrix.png) | ![v1 ROC curve](../reports/version_1/roc_curve.png) |
+
+### v2
+| Confusion matrix | ROC curve |
+|---|---|
+| ![v2 confusion matrix](../reports/version_2/confusion_matrix.png) | ![v2 ROC curve](../reports/version_2/roc_curve.png) |
+
+### v3 (active)
+| Confusion matrix | ROC curve |
+|---|---|
+| ![v3 confusion matrix](../reports/version_3/confusion_matrix.png) | ![v3 ROC curve](../reports/version_3/roc_curve.png) |
 
 ## Possible next steps (not done)
 - Isolate the v2->v3 comparison cleanly: rerun at 10% sample with 5-fold CV (holding folds constant) to see how much of the gain is from more data vs. fewer folds.

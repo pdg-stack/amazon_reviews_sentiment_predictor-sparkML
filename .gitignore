@@ -1,13 +1,14 @@
 # Data (never commit the dataset itself)
 data/
 
-# Trained models, tracking, reports, logs -- all runtime-generated
+# Trained models, tracking, logs -- runtime-generated, not portable/reproducible
 models/
 mlruns/
 mlflow.db*
-reports/
 logs/
 /_*.log
+
+# reports/ IS committed (see docs/MODEL_HISTORY.md, which embeds its charts)
 
 # Secrets (keep the folder + its placeholder note, ignore only the real token)
 .kaggle/*

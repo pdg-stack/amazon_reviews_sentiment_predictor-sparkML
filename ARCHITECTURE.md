@@ -71,3 +71,5 @@ A Postman collection ("Amazon Reviews Sentiment Predictor API") in workspace "PD
 ## Path to a cloud deployment (future work, not built now)
 - **Batch**: the same Spark job (`preprocess.py` -> `train.py` -> `evaluate.py`) can run unchanged on a managed Spark cluster (Databricks, EMR, Dataproc) — `PipelineModel`'s save format is portable.
 - **Real-time**: the current FastAPI container could run as-is on any container host (Cloud Run, ECS, etc.), but for meaningful request-per-second scaling, the recommended next step is exporting the trained model's coefficients/vocabulary and serving with a lighter, non-JVM scorer, keeping the same `/predict` contract and API-key security model documented above.
+
+See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the full, step-by-step (provider-agnostic) plan.

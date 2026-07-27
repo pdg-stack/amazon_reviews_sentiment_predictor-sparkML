@@ -9,20 +9,31 @@ Each Amazon review comes with a `polarity` label: `1` (negative) or `2` (positiv
 `preprocess.py` concatenates `title` and `text` into a single `review_text` column (`concat_ws(" ", title, text)`, which gracefully drops the title when one isn't present) before anything else happens. The reasoning: a review's title is often a *concentrated* sentiment signal on its own — someone titling a review "Terrible, don't buy!!" has told you most of what you need to know before the body even starts. Throwing the title away would discard a cheap, high-signal feature; combining it with the body instead of modeling it as a separate feature keeps the rest of the pipeline (Tokenizer onward) unchanged — the model just sees more (and often more concentrated) text per review. Every stage below — and `train.py`, `predict.py`, and the API's `/predict` endpoint — operate on `review_text`, never on `text` alone, so training and serving always see the same kind of input.
 
 ## Why this pipeline, stage by stage
+Each stage below links to the matching cell in [`02_pipeline_walkthrough.ipynb`](../notebooks/02_pipeline_walkthrough.ipynb) — on GitHub that link jumps straight to and runs that stage's actual code; opened locally in Jupyter/VS Code it just opens the notebook (cell-level jump isn't guaranteed everywhere, but the notebook itself is short and in the same stage order as here).
 
 ### 1. Tokenizer
+▶ [Run this stage](../notebooks/02_pipeline_walkthrough.ipynb#stage-1-tokenizer)
+
 Splits `review_text` into individual words ("This product is great" -> `["this", "product", "is", "great"]`). Machine learning models work with numbers, not sentences, so the first step in any text pipeline is breaking text into discrete units (tokens) that can eventually be turned into numeric features.
 
 ### 2. StopWordsRemover
+▶ [Run this stage](../notebooks/02_pipeline_walkthrough.ipynb#stage-2-stopwordsremover)
+
 Drops extremely common words ("the", "is", "a", ...) that carry little sentiment signal on their own. Removing them shrinks the vocabulary and lets the model spend its capacity on words that actually distinguish positive from negative reviews (e.g. "great", "terrible", "disappointed").
 
 ### 3. HashingTF (why hashing, not a plain word-count vocabulary)
+▶ [Run this stage](../notebooks/02_pipeline_walkthrough.ipynb#stage-3-hashingtf)
+
 Converts the remaining words into a fixed-size numeric vector by hashing each word to a bucket index. The alternative — building an explicit vocabulary (`CountVectorizer`) that maps every unique word to its own column — needs a full pass over the data to build that vocabulary and grows without bound as new words appear. Hashing trades a small, usually negligible risk of two different words landing in the same bucket ("hash collisions") for a fixed memory footprint and no separate vocabulary-building pass — a good trade at the scale of ~3.6M reviews.
 
 ### 4. IDF (Inverse Document Frequency)
+▶ [Run this stage](../notebooks/02_pipeline_walkthrough.ipynb#stage-4-idf-inverse-document-frequency)
+
 Re-weights the hashed term-frequency vector so that words appearing in *almost every* review (even after stopword removal) count for less, and words that are rarer-but-informative count for more. TF alone treats "good" and "phenomenal" as equally important if they appear the same number of times; IDF recognizes that rarer words are often more discriminative.
 
 ### 5. LogisticRegression
+▶ [Run this stage](../notebooks/02_pipeline_walkthrough.ipynb#stage-5-logisticregression)
+
 The classifier itself. Chosen as the baseline over more complex models (e.g. deep neural nets) because: it's fast to train even on millions of sparse text-vector rows, it's directly interpretable (each feature gets a signed weight — you can inspect which hashed word-buckets push toward "positive" vs "negative"), and it's a strong, well-understood baseline for text classification. Once this baseline works end-to-end, swapping in a fancier classifier later is a one-line change (the rest of the pipeline stays the same).
 
 ## Why cross-validation + hyperparameter tuning

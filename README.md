@@ -2,7 +2,7 @@
 
 A containerized PySpark project that explores the [Amazon Reviews](https://www.kaggle.com/datasets/kritanjalijain/amazon-reviews) dataset, tunes and trains a sentiment-classification model (Spark MLlib, with k-fold cross-validation and hyperparameter search tracked in MLflow), evaluates it with charts, and serves it both as a batch job and a secured real-time API.
 
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) for how the pieces fit together, and [`docs/model_plan.md`](docs/model_plan.md) for why the modeling pipeline is built the way it is.
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for how the pieces fit together, [`docs/model_plan.md`](docs/model_plan.md) for why the modeling pipeline is built the way it is, [`docs/MODEL_HISTORY.md`](docs/MODEL_HISTORY.md) for how the model has evolved across versions, and [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the (not-yet-built) cloud deployment plan.
 
 **Data is never committed to this repo** — you download your own copy locally (see below).
 

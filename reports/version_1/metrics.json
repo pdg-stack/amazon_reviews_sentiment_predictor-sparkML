@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "model_uri": "models:/amazon_review_sentiment_predictor/1",
+  "accuracy": 0.8253325,
+  "f1": 0.8252602607471965,
+  "auc": 0.9041324846874997,
+  "evaluated_at": "2026-07-27T11:53:02.864249"
+}
