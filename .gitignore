@@ -24,3 +24,6 @@ __pycache__/
 # Spark
 spark-warehouse/
 derby.log
+
+# Claude Code agent worktree storage (tooling metadata, not project content)
+.claude/

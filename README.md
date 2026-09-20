@@ -4,6 +4,8 @@ A containerized PySpark project that explores the [Amazon Reviews](https://www.k
 
 See [`docs/ARCHITECTURE_NOTES.md`](docs/ARCHITECTURE_NOTES.md) for how the pieces fit together, [`docs/model_plan.md`](docs/model_plan.md) for why the modeling pipeline is built the way it is, [`docs/MODEL_HISTORY.md`](docs/MODEL_HISTORY.md) for how the model has evolved across versions, [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) for the API's logging/metrics/drift-monitoring design, and [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the (not-yet-built) cloud deployment plan.
 
+The steps below use the VS Code Dev Container (one container, everything run by hand). For an alternative that splits FastAPI, the MLflow UI, a persistent Spark cluster, and batch jobs into independently-running services via `docker compose`, see [`docs/DOCKER_COMPOSE.md`](docs/DOCKER_COMPOSE.md) instead -- it's additive, not a replacement for the steps below.
+
 **Data is never committed to this repo** — you download your own copy locally (see below).
 
 ## Prerequisites

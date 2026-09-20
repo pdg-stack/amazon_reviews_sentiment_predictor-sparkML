@@ -1,0 +1,182 @@
+# Splits the single .devcontainer image (see .devcontainer/Dockerfile) into
+# independently-running services backed by a real standalone Spark cluster,
+# instead of each process running its own embedded local[*] Spark. Every
+# service below is built FROM THE SAME IMAGE/Dockerfile -- same pinned
+# pyspark==3.5.3 everywhere -- because Spark requires the client and cluster
+# to run the exact same version; a mismatched pyspark on the client talking
+# to this cluster will fail with serialization/protocol errors.
+#
+# Two different things are both called "Spark UI" -- don't conflate them:
+#   - Master UI (spark-master, port 8080): persistent, always up whenever
+#     spark-master is running, independent of any particular job. THIS is
+#     what makes "Spark UI" a genuinely independent, always-on service.
+#   - Driver/application UI (port 4040): only exists while a specific
+#     application's driver process is alive (api's long-lived SparkSession,
+#     or a one-off pipeline job) -- it's hosted by the driver itself, which
+#     is inherent to Spark's architecture and can't be fully separated out
+#     even with a cluster. Exposed on `api` (and available on `pipeline` via
+#     `--service-ports` since it's profile-gated) so it's reachable, but it
+#     is NOT a persistent/independent service the way the master UI is.
+#
+# The .devcontainer / VS Code workflow is untouched by any of this: it never
+# sets SPARK_MASTER_URL, so src/config.py's get_spark_session() keeps
+# defaulting to local[*] there. Only the services below set it explicitly.
+#
+# Bind mounts (not named volumes) throughout, matching this project's
+# existing philosophy (see docs/ARCHITECTURE_NOTES.md) of keeping data/models/logs/
+# mlruns out of the image entirely, always mounted from the host -- same
+# host paths the .devcontainer setup already uses. spark-master is the only
+# service that does NOT need this: it only manages worker registration and
+# app scheduling, it never reads a data/model file itself. spark-worker DOES
+# need it (see its own comment below) -- task execution happens there, and
+# Spark's `file:///workspace/...` reads must resolve on whichever container
+# the task actually runs on, not just the driver's.
+
+services:
+  # Persistent, independent Spark Master -- this is "Spark UI" as its own
+  # service. Master UI: http://localhost:8080. Cluster endpoint other
+  # services submit to: spark://spark-master:7077.
+  spark-master:
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+    image: amazon-reviews-sentiment:latest
+    container_name: spark-master
+    command: >
+      /usr/local/lib/python3.11/site-packages/pyspark/bin/spark-class
+      org.apache.spark.deploy.master.Master
+      --host 0.0.0.0 --port 7077 --webui-port 8080
+    # NOTE: the pip-installed pyspark distribution's sbin/ does NOT include
+    # start-master.sh/start-worker.sh (only spark-daemon.sh, spark-config.sh,
+    # and the history-server scripts -- verified by inspecting the installed
+    # package). We invoke spark-class directly instead, which is what those
+    # missing scripts would have wrapped anyway, and it runs in the
+    # foreground, which is what a container command needs.
+    ports:
+      - "8080:8080"  # Master UI
+      - "7077:7077"  # cluster endpoint (spark-master:7077 from other containers)
+    # No repo files needed here -- just the Spark binaries already baked
+    # into the image.
+
+  # Spark worker -- registers with spark-master and actually executes tasks.
+  # Scale with: docker compose up -d --scale spark-worker=N spark-worker
+  # (no `deploy.replicas`/swarm usage elsewhere in this project, so plain
+  # `--scale` fits its style better).
+  spark-worker:
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+    image: amazon-reviews-sentiment:latest
+    working_dir: /workspace
+    command: >
+      /usr/local/lib/python3.11/site-packages/pyspark/bin/spark-class
+      org.apache.spark.deploy.worker.Worker
+      spark://spark-master:7077 --webui-port 8081
+    depends_on:
+      - spark-master
+    ports:
+      - "8081"  # worker UI; no fixed host port so `--scale` doesn't collide
+    volumes:
+      # Unlike spark-master, the worker DOES need this: Spark distributes
+      # file reads to executor processes, which run inside this container --
+      # confirmed by testing, an api/pipeline request against models/active/
+      # or data/ fails with FileNotFoundException on the executor otherwise,
+      # since `file:///workspace/...` paths must resolve identically on
+      # every container that runs a task, not just the driver's container.
+      - .:/workspace
+
+  # MLflow UI -- browses run/metric/registry history from the bind-mounted
+  # mlruns/ (sqlite backend, see src/config.py MLFLOW_TRACKING_URI).
+  mlflow-ui:
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+    image: amazon-reviews-sentiment:latest
+    container_name: mlflow-ui
+    working_dir: /workspace
+    command: mlflow ui --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlruns/mlflow.db
+    ports:
+      - "5000:5000"
+    volumes:
+      - .:/workspace
+
+  # FastAPI real-time serving layer -- a Spark *client* submitting to the
+  # cluster above, not an embedded local[*] session.
+  api:
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+    image: amazon-reviews-sentiment:latest
+    container_name: api
+    working_dir: /workspace
+    command: uvicorn src.api.app:app --host 0.0.0.0 --port 8000
+    environment:
+      SPARK_MASTER_URL: spark://spark-master:7077
+      # Standalone Spark's default is "an app gets every available core,
+      # indefinitely" -- on a small cluster that means api's persistent
+      # SparkSession silently starves any concurrently-running `pipeline`
+      # job of executor resources (confirmed by testing: the pipeline job
+      # sat retrying "Initial job has not accepted any resources" forever
+      # while api was up). Capping api to 1 core leaves the rest of the
+      # cluster free. Raise this (and/or scale spark-worker) if you need
+      # api to handle more concurrent /predict load.
+      SPARK_CORES_MAX: "1"
+      # Every src/*.py script imports as `from src.config import ...` (an
+      # absolute import rooted at the repo root), which only resolves if
+      # /workspace itself is on sys.path. `uvicorn <module>:<app>` handles
+      # this itself (it prepends cwd to sys.path before importing), which is
+      # why `api` didn't strictly need this -- set here anyway for
+      # consistency/robustness. `pipeline` (below) DOES need it: plain
+      # `python src/train.py`-style invocations do NOT get cwd added to
+      # sys.path automatically (only the script's own directory, src/, is
+      # -- verified by testing; `python src/evaluate.py` fails with
+      # `ModuleNotFoundError: No module named 'src'` without this).
+      PYTHONPATH: /workspace
+    env_file:
+      - .env  # provides API_KEY (python-dotenv also loads this at startup; both are belt-and-suspenders)
+    depends_on:
+      - spark-master
+      - spark-worker
+    ports:
+      - "8000:8000"  # FastAPI
+      - "4040:4040"  # driver UI -- only live while a request is actively executing (see note above)
+    volumes:
+      - .:/workspace
+
+  # Training / batch jobs (train.py, evaluate.py, preprocess.py,
+  # data_download.py, set_active_model.py). One service, `profiles: [tools]`
+  # so it's excluded from a bare `docker compose up` and never auto-starts
+  # or competes with the always-on UI/API containers for resources. Run
+  # on-demand:
+  #   docker compose run --rm pipeline python src/train.py --sample-fraction 0.05
+  #   docker compose run --rm pipeline python src/evaluate.py --version 3
+  #   docker compose run --rm pipeline python src/preprocess.py
+  #   docker compose run --rm pipeline python src/data_download.py
+  #   docker compose run --rm pipeline python src/set_active_model.py --version 3
+  pipeline:
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+    image: amazon-reviews-sentiment:latest
+    working_dir: /workspace
+    profiles:
+      - tools
+    environment:
+      SPARK_MASTER_URL: spark://spark-master:7077
+      # See the longer comment on `api`'s PYTHONPATH above -- required here
+      # so plain `python src/train.py`-style invocations (matching the
+      # README's documented command shape) can resolve `from src.config
+      # import ...`.
+      PYTHONPATH: /workspace
+    env_file:
+      - .env
+    depends_on:
+      - spark-master
+      - spark-worker
+    volumes:
+      - .:/workspace
+      # data_download.py reads the Kaggle token from ~/.kaggle -- same bind
+      # mount .devcontainer/devcontainer.json uses.
+      - ./.kaggle:/root/.kaggle
+    # No `ports:` -- add --service-ports on a `docker compose run` invocation
+    # if you want to reach this job's driver UI (4040) while it's running.

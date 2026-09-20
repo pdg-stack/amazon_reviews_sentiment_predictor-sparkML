@@ -8,6 +8,9 @@ A containerized PySpark project: explore Amazon review data, tune and train a se
 
 Ports forwarded: **4040** (Spark UI, while a job is running), **8000** (FastAPI -- also serves `/metrics`), **5000** (MLflow UI).
 
+### Alternative: split services via Docker Compose
+`docker-compose.yml` (repo root) is an additive alternative to the single-container devcontainer above -- it splits FastAPI, the MLflow UI, a persistent Spark cluster (`spark-master`/`spark-worker`), and on-demand training/batch jobs into independently-running services, all built from this same `.devcontainer/Dockerfile` (one pinned dependency set, no version drift). The devcontainer workflow described above is completely unaffected -- nothing about it changes. See [`docs/DOCKER_COMPOSE.md`](docs/DOCKER_COMPOSE.md) for the full topology, the master-UI-vs-driver-UI distinction, and how to run it.
+
 ## Data flow
 ```
 Kaggle (kritanjalijain/amazon-reviews)
