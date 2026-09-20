@@ -19,6 +19,16 @@ RUN pip install --no-cache-dir \
     mlflow \
     fastapi \
     "uvicorn[standard]" \
-    python-dotenv
+    python-dotenv \
+    prometheus-fastapi-instrumentator \
+    pytest
 
 WORKDIR /workspace
+
+# Only takes effect if the container is run without an explicit command
+# override (VS Code's Dev Containers attach ignores this and opens a plain
+# shell instead) -- starts the MLflow UI + FastAPI app together so both are
+# reachable without a manual step. See start-services.sh for details.
+COPY .devcontainer/start-services.sh /usr/local/bin/start-services.sh
+RUN chmod +x /usr/local/bin/start-services.sh
+CMD ["/usr/local/bin/start-services.sh"]

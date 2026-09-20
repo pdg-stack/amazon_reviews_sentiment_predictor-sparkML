@@ -22,6 +22,10 @@ each other):
                              hyperparameter tuning actually help" chart.
                              Always reflects the *most recent* train.py run,
                              regardless of which --version is being scored.
+
+Also writes baseline_stats.json -- prediction-confidence and review-length
+histograms used by the API's automated drift check once this version is
+activated (see set_active_model.py, src/api/drift.py, docs/OBSERVABILITY.md).
 """
 
 import argparse
@@ -33,6 +37,7 @@ import matplotlib
 matplotlib.use("Agg")  # no display inside the container
 import matplotlib.pyplot as plt
 import mlflow
+import numpy as np
 import seaborn as sns
 from pyspark.ml.evaluation import BinaryClassificationEvaluator, MulticlassClassificationEvaluator
 from pyspark.ml.functions import vector_to_array
@@ -161,6 +166,57 @@ def plot_tuning_improvement(out_path):
     plt.close(fig)
 
 
+def save_baseline_stats(predictions, out_path, n_bins: int = 20):
+    """
+    Captures the distribution shape that src/api/drift.py later compares
+    live /predict traffic against (see docs/OBSERVABILITY.md). Two signals,
+    each stored as a histogram (bin edges + counts) so a fresh sample can be
+    re-bucketed into the same bins later without needing the raw data:
+
+      - Predicted-class confidence: max(prob[0], prob[1]) per row -- this is
+        deliberately the SAME quantity the live API logs as `probability`
+        (confidence in whichever class it picked, not always P(positive)),
+        so the baseline and live measurements are comparable. It's
+        mathematically bounded to [0.5, 1.0] for a binary classifier, so
+        fixed-width bins are built over that range (not [0, 1], which would
+        leave the bottom half permanently empty).
+      - review_text word count: quantile-based bins, since word count is
+        unbounded and skewed. Bin edges are deduped (np.unique) because
+        discrete, low-magnitude counts commonly produce duplicate quantile
+        boundaries, which would otherwise create zero-width bins.
+    """
+    scored = predictions.select(
+        vector_to_array(F.col("probability"))[1].alias("p1"),
+        F.col("prediction"),
+        F.size(F.split(F.col("review_text"), " ")).alias("review_length"),
+    ).toPandas()
+
+    confidence = np.where(scored["prediction"] == 1.0, scored["p1"], 1.0 - scored["p1"]).astype(float)
+    lengths = scored["review_length"].to_numpy()
+
+    confidence_edges = np.linspace(0.5, 1.0, n_bins + 1)
+    confidence_counts, _ = np.histogram(confidence, bins=confidence_edges)
+
+    length_edges = np.unique(np.quantile(lengths, np.linspace(0, 1, n_bins + 1)))
+    length_counts, _ = np.histogram(lengths, bins=length_edges)
+
+    baseline = {
+        "computed_at": datetime.datetime.now().isoformat(),
+        "sample_size": int(len(scored)),
+        "confidence_bins": {
+            "edges": confidence_edges.tolist(),
+            "counts": confidence_counts.tolist(),
+            "min": float(confidence.min()),
+            "max": float(confidence.max()),
+        },
+        "length_bins": {
+            "edges": length_edges.tolist(),
+            "counts": length_counts.tolist(),
+        },
+    }
+    out_path.write_text(json.dumps(baseline, indent=2))
+
+
 def main(version: int | None = None):
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
@@ -189,6 +245,7 @@ def main(version: int | None = None):
     plot_confusion_matrix(predictions, out_dir / "confusion_matrix.png")
     plot_roc_curve(predictions, auc, out_dir / "roc_curve.png")
     plot_tuning_improvement(out_dir / "tuning_improvement.png")
+    save_baseline_stats(predictions, out_dir / "baseline_stats.json")
 
     # Persisted (not just printed) so a separate script can later compare
     # several versions' test-set metrics side by side without re-scoring.
