@@ -4,6 +4,7 @@ this project so there is exactly one place that defines "where does data/
 models/reports live" and "how do we start Spark."
 """
 
+import os
 from pathlib import Path
 
 from pyspark.sql import SparkSession
@@ -46,18 +47,44 @@ def get_spark_session(app_name: str = "amazon-reviews-sentiment") -> SparkSessio
     """
     One shared way to start Spark, used by every script/notebook.
 
-    local[*] uses all CPU cores available to the container -- there's no
-    cluster here, just a single container, so this is the right mode for
-    this project. In local mode the driver and executor share one JVM, so
-    spark.driver.memory is the only heap that matters. The 1g default was
-    fine for train.py's --sample-fraction runs but OOM'd evaluate.py/
-    predict.py against the full, un-sampled 400K-row test set -- 2g gives
-    enough headroom for that on this container's ~3.8GB total allocation.
+    Master defaults to local[*] -- all CPU cores available to the container --
+    which is correct for the .devcontainer VS Code workflow: one container,
+    no cluster, so this is the right mode there and stays the unchanged
+    default for anyone using that setup. In local mode the driver and
+    executor share one JVM, so spark.driver.memory is the only heap that
+    matters. The 1g default was fine for train.py's --sample-fraction runs
+    but OOM'd evaluate.py/predict.py against the full, un-sampled 400K-row
+    test set -- 2g gives enough headroom for that on this container's
+    ~3.8GB total allocation.
+
+    The docker-compose setup (docker-compose.yml) is the one exception: it
+    runs a real standalone Spark cluster (spark-master/spark-worker) and
+    sets SPARK_MASTER_URL=spark://spark-master:7077 via `environment:` on
+    the api/pipeline services so they submit to it as clients instead of
+    running embedded local Spark. Nothing else needs to set this env var --
+    it's unset (and this falls back to local[*]) everywhere else, including
+    the .devcontainer image.
     """
-    return (
+    master_url = os.environ.get("SPARK_MASTER_URL", "local[*]")
+    builder = (
         SparkSession.builder.appName(app_name)
-        .master("local[*]")
+        .master(master_url)
         .config("spark.driver.memory", "2g")
         .config("spark.sql.shuffle.partitions", "8")  # small container, no need for Spark's 200-partition default
-        .getOrCreate()
     )
+    # Standalone Spark's default is "an application gets ALL available cores
+    # in the cluster, for as long as it's alive" -- fine for a one-off batch
+    # job, but fatal for a small cluster once a long-lived app is in the mix:
+    # confirmed by testing, the api service's persistent SparkSession
+    # silently starved a `pipeline` job of every executor slot (it sat
+    # printing "Initial job has not accepted any resources" indefinitely)
+    # because api had already claimed both of the single worker's cores and
+    # never gives them back. SPARK_CORES_MAX (unset by default, so this is a
+    # no-op for local[*] and for any cluster session that doesn't need it)
+    # lets a service cap how many cores it claims, leaving the rest free for
+    # other concurrent applications -- see docker-compose.yml, where `api`
+    # sets it to 1.
+    cores_max = os.environ.get("SPARK_CORES_MAX")
+    if cores_max:
+        builder = builder.config("spark.cores.max", cores_max)
+    return builder.getOrCreate()
