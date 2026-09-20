@@ -32,7 +32,7 @@ The container image already built by `.devcontainer/Dockerfile` (Java 17 + PySpa
 - **Scheduling**: a cron-like trigger (the platform's own scheduler, or Airflow/Dagster/GitHub Actions calling into it) replaces manually running `python src/run_pipeline.py`.
 
 ### What doesn't change
-The actual pipeline logic (`Tokenizer` -> `StopWordsRemover` -> `HashingTF` -> `IDF` -> `LogisticRegression`, `CrossValidator`, MLflow logging/registration) is unchanged -- `PipelineModel`'s save format and MLflow's APIs work identically on a managed cluster. `set_active_model.py`'s "explicit, on-demand activation" design (see `ARCHITECTURE.md`) also carries over unchanged -- it's still a deliberate step, just now pointed at a shared registry instead of a local one.
+The actual pipeline logic (`Tokenizer` -> `StopWordsRemover` -> `HashingTF` -> `IDF` -> `LogisticRegression`, `CrossValidator`, MLflow logging/registration) is unchanged -- `PipelineModel`'s save format and MLflow's APIs work identically on a managed cluster. `set_active_model.py`'s "explicit, on-demand activation" design (see `ARCHITECTURE_NOTES.md`) also carries over unchanged -- it's still a deliberate step, just now pointed at a shared registry instead of a local one.
 
 ## Real-time track: deploying the FastAPI service
 
@@ -46,11 +46,11 @@ The actual pipeline logic (`Tokenizer` -> `StopWordsRemover` -> `HashingTF` -> `
 ### Where to run it
 Any container host works unchanged, since the app is already just a Docker image exposing one HTTP port -- ECS/Fargate or App Runner on AWS, Cloud Run on GCP, Container Apps on Azure, or plain Kubernetes. Pick based on what you already operate elsewhere, not because this app needs anything platform-specific. `GET /health` (unauthenticated, already built) maps directly onto whatever health-check convention that host expects.
 
-### Performance caveat (carried over from `ARCHITECTURE.md`)
+### Performance caveat (carried over from `ARCHITECTURE_NOTES.md`)
 The current app keeps a resident `SparkSession` per process -- fine for the request volumes this project has seen so far, but each replica pays full JVM startup cost and Spark's per-request overhead doesn't shrink just because the model is small. If request volume grows enough for this to matter, the recommended next step (not built) is exporting the trained model's coefficients/vocabulary (e.g. via MLeap, or a hand-rolled scorer using the `LogisticRegressionModel`'s coefficients + the same hashing scheme) and serving with a lightweight, non-JVM process -- same `/predict` contract, same API-key model, much cheaper per replica. Until then, deploying the current container as-is is a reasonable starting point, just not one to scale to high RPS.
 
 ### After it's deployed
-- Update the Postman "Production" environment's `baseUrl` (currently blank, see `ARCHITECTURE.md`) to the deployed URL, and its `apiKey` to whatever secret was provisioned for that environment -- never reuse the local dev key (see the earlier discussion on why per-environment secrets matter).
+- Update the Postman "Production" environment's `baseUrl` (currently blank, see `ARCHITECTURE_NOTES.md`) to the deployed URL, and its `apiKey` to whatever secret was provisioned for that environment -- never reuse the local dev key (see the earlier discussion on why per-environment secrets matter).
 - `set_active_model.py --reload-api --api-url https://<deployed-url>` works against a deployed instance exactly as it does locally, once `API_KEY` is available to whoever runs that command.
 
 ## Summary checklist

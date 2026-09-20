@@ -23,7 +23,7 @@
 # defaulting to local[*] there. Only the services below set it explicitly.
 #
 # Bind mounts (not named volumes) throughout, matching this project's
-# existing philosophy (see ARCHITECTURE.md) of keeping data/models/logs/
+# existing philosophy (see docs/ARCHITECTURE_NOTES.md) of keeping data/models/logs/
 # mlruns out of the image entirely, always mounted from the host -- same
 # host paths the .devcontainer setup already uses. spark-master is the only
 # service that does NOT need this: it only manages worker registration and

@@ -2,7 +2,7 @@
 
 A containerized PySpark project that explores the [Amazon Reviews](https://www.kaggle.com/datasets/kritanjalijain/amazon-reviews) dataset, tunes and trains a sentiment-classification model (Spark MLlib, with k-fold cross-validation and hyperparameter search tracked in MLflow), evaluates it with charts, and serves it both as a batch job and a secured real-time API.
 
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) for how the pieces fit together, [`docs/model_plan.md`](docs/model_plan.md) for why the modeling pipeline is built the way it is, [`docs/MODEL_HISTORY.md`](docs/MODEL_HISTORY.md) for how the model has evolved across versions, and [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the (not-yet-built) cloud deployment plan.
+See [`docs/ARCHITECTURE_NOTES.md`](docs/ARCHITECTURE_NOTES.md) for how the pieces fit together, [`docs/model_plan.md`](docs/model_plan.md) for why the modeling pipeline is built the way it is, [`docs/MODEL_HISTORY.md`](docs/MODEL_HISTORY.md) for how the model has evolved across versions, [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) for the API's logging/metrics/drift-monitoring design, and [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the (not-yet-built) cloud deployment plan.
 
 The steps below use the VS Code Dev Container (one container, everything run by hand). For an alternative that splits FastAPI, the MLflow UI, a persistent Spark cluster, and batch jobs into independently-running services via `docker compose`, see [`docs/DOCKER_COMPOSE.md`](docs/DOCKER_COMPOSE.md) instead -- it's additive, not a replacement for the steps below.
 
@@ -78,7 +78,7 @@ curl -X POST http://localhost:8000/predict \
   -d '{"title": "Best purchase ever", "text": "This product is amazing, I love it!"}'
 # -> {"sentiment": "positive", "probability": 0.93}
 ```
-`GET /health` needs no key. Every `/predict` call is logged to `logs/api_requests.log`.
+`GET /health` needs no key. Every request is logged to `logs/api_requests.log`; `GET /metrics` (Prometheus format, no key) and `GET /admin/drift-report` (needs the key) are also available — see step 8.
 
 **Switching the model version on a running API**: `set_active_model.py` alone does not restart or update an already-running API (see step 5). To do both in one command:
 ```
@@ -88,6 +88,14 @@ This activates version `N` and then calls the API's `POST /admin/reload-model` (
 
 A Postman collection ("Amazon Reviews Sentiment Predictor API", workspace "PDG's Workspace") documents and exercises both endpoints, with separate "Local"/"Production" environments.
 
+## 8. Observability
+`GET /metrics` (no key) exposes Prometheus-format request counters/latency histograms plus `active_model_version` and `prediction_drift_psi` gauges. `GET /admin/drift-report` (needs `X-API-Key`) returns the latest result from a background check that compares recent `/predict` traffic against a baseline captured at evaluation time:
+```
+python src/evaluate.py --version N        # also writes reports/version_N/baseline_stats.json now
+python src/set_active_model.py --version N  # copies it to models/active/BASELINE_STATS.json
+```
+Full design (log schema, PSI thresholds, what this does and doesn't detect) in [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
+
 ## Notes
 - If full-dataset runs (3.6M rows) feel slow, increase Docker Desktop's memory allocation (Settings -> Resources).
-- Switching the API's model version always requires an explicit `set_active_model.py` run — this is intentional (see `ARCHITECTURE.md`). Add `--reload-api` to also update a running API immediately instead of needing a separate restart.
+- Switching the API's model version always requires an explicit `set_active_model.py` run — this is intentional (see `docs/ARCHITECTURE_NOTES.md`). Add `--reload-api` to also update a running API immediately instead of needing a separate restart.

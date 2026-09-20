@@ -1,6 +1,6 @@
 # Docker Compose: split-service deployment
 
-`docker-compose.yml` (repo root) is an **alternative** to the `.devcontainer` workflow described in the main [`README.md`](../README.md) and [`ARCHITECTURE.md`](../ARCHITECTURE.md) -- not a replacement. The devcontainer keeps working completely unchanged: it's still one container, PySpark in embedded `local[*]` mode, you run whichever script you want by hand. Nothing here requires the devcontainer to be set up or touched.
+`docker-compose.yml` (repo root) is an **alternative** to the `.devcontainer` workflow described in the main [`README.md`](../README.md) and [`ARCHITECTURE_NOTES.md`](ARCHITECTURE_NOTES.md) -- not a replacement. The devcontainer keeps working completely unchanged: it's still one container, PySpark in embedded `local[*]` mode, you run whichever script you want by hand. Nothing here requires the devcontainer to be set up or touched.
 
 What compose adds: genuinely separate, independently-running services instead of "one container you run everything inside," backed by a real standalone Spark cluster instead of each process's own embedded `local[*]` session.
 
@@ -40,7 +40,7 @@ With the cluster in place, actual task *execution* happens on `spark-worker` con
 All services build from the same `.devcontainer/Dockerfile` (`build: {context: ., dockerfile: .devcontainer/Dockerfile}`), so there is exactly one pinned dependency set for everything.
 
 ### Shared state (bind mounts, not named volumes)
-Consistent with this project's existing philosophy (see `ARCHITECTURE.md`: everything is bind-mounted from the host, nothing project-specific is baked into the image), `mlflow-ui`, `api`, and `pipeline` all bind-mount the **entire repo root to `/workspace`** -- the same thing `.devcontainer` does. That single mount covers `data/`, `models/`, `mlruns/`, `logs/`, `reports/`, and the `src/` code itself (the image never `COPY`s source code in), so all of it stays in sync with the host and with each other automatically. `spark-master`/`spark-worker` mount nothing -- they only need the Spark binaries already in the image.
+Consistent with this project's existing philosophy (see `ARCHITECTURE_NOTES.md`: everything is bind-mounted from the host, nothing project-specific is baked into the image), `mlflow-ui`, `api`, and `pipeline` all bind-mount the **entire repo root to `/workspace`** -- the same thing `.devcontainer` does. That single mount covers `data/`, `models/`, `mlruns/`, `logs/`, `reports/`, and the `src/` code itself (the image never `COPY`s source code in), so all of it stays in sync with the host and with each other automatically. `spark-master`/`spark-worker` mount nothing -- they only need the Spark binaries already in the image.
 
 ### Secrets
 The `api` and `pipeline` services load `API_KEY` from a local, gitignored `.env` via `env_file:` (the same file `python-dotenv` also loads at API startup, and the same one `scripts/generate_api_key.py` writes) -- never baked into the compose file or the image.

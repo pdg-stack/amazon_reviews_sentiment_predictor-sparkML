@@ -10,7 +10,7 @@ therefore always a deliberate, on-demand, auditable action:
     python src/set_active_model.py --version 3
 
 By default the running API does NOT pick this up automatically -- there is
-no background polling/hot-reload by design (see ARCHITECTURE.md). To set the
+no background polling/hot-reload by design (see docs/ARCHITECTURE_NOTES.md). To set the
 active version AND have a currently-running API start serving it, in one
 command, add --reload-api:
 
@@ -36,11 +36,13 @@ from dotenv import load_dotenv
 from mlflow.tracking import MlflowClient
 
 from src.config import (
+    ACTIVE_BASELINE_PATH,
     ACTIVE_MODEL_DIR,
     ACTIVE_MODEL_MANIFEST,
     MLFLOW_MODEL_NAME,
     MLFLOW_TRACKING_URI,
     PROJECT_ROOT,
+    REPORTS_DIR,
     get_spark_session,
 )
 
@@ -91,6 +93,22 @@ def main(version: int, reload_api: bool = False, api_url: str = "http://localhos
         "activated_at": datetime.datetime.now().isoformat(),
     }
     ACTIVE_MODEL_MANIFEST.write_text(json.dumps(manifest, indent=2))
+
+    # Copies this version's drift baseline (written by evaluate.py) so
+    # models/active/BASELINE_STATS.json always matches whichever model is
+    # actually being served -- see src/api/drift.py.
+    baseline_src = REPORTS_DIR / f"version_{version}" / "baseline_stats.json"
+    if baseline_src.exists():
+        shutil.copy(baseline_src, ACTIVE_BASELINE_PATH)
+        print(f"Drift baseline copied from {baseline_src}.")
+    else:
+        if ACTIVE_BASELINE_PATH.exists():
+            ACTIVE_BASELINE_PATH.unlink()
+        print(
+            f"No baseline_stats.json found for version {version} -- run "
+            f"`python src/evaluate.py --version {version}` first if you want the API's "
+            "automated drift check to work for this version. It will report 'unavailable' until then."
+        )
 
     print(f"models/active/ now serves version {version}.")
 

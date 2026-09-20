@@ -21,6 +21,11 @@ DATA_PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 MODELS_DIR = PROJECT_ROOT / "models"
 ACTIVE_MODEL_DIR = MODELS_DIR / "active"
 ACTIVE_MODEL_MANIFEST = ACTIVE_MODEL_DIR / "ACTIVE_MODEL.json"
+# Drift baseline (prediction-confidence + review-length histograms) for
+# whichever version is currently active -- copied here from
+# reports/version_N/baseline_stats.json by set_active_model.py, so it always
+# matches the model actually being served. See src/api/drift.py.
+ACTIVE_BASELINE_PATH = ACTIVE_MODEL_DIR / "BASELINE_STATS.json"
 
 REPORTS_DIR = PROJECT_ROOT / "reports"
 LOGS_DIR = PROJECT_ROOT / "logs"

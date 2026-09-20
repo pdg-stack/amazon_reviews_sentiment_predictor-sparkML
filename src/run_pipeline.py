@@ -5,7 +5,7 @@ MAIN ORCHESTRATOR: runs the full pipeline end to end --
 
 This does NOT call set_active_model.py or start the API -- promoting a
 trained model to "live" and serving it are explicit, on-demand steps by
-design (see ARCHITECTURE.md). Each stage is also independently runnable
+design (see docs/ARCHITECTURE_NOTES.md). Each stage is also independently runnable
 (e.g. `python src/train.py --sample-fraction 0.05`) for debugging one step
 at a time.
 """
