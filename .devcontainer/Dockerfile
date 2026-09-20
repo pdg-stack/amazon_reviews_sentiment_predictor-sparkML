@@ -24,6 +24,7 @@ RUN pip install --no-cache-dir \
     pytest
 
 WORKDIR /workspace
+ENV PYTHONPATH=/workspace
 
 # Only takes effect if the container is run without an explicit command
 # override (VS Code's Dev Containers attach ignores this and opens a plain
