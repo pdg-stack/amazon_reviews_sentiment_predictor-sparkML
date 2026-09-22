@@ -1,4 +1,4 @@
-# Splits the single .devcontainer image (see .devcontainer/Dockerfile) into
+# Splits the single docker/Dockerfile image into
 # independently-running services backed by a real standalone Spark cluster,
 # instead of each process running its own embedded local[*] Spark. Every
 # service below is built FROM THE SAME IMAGE/Dockerfile -- same pinned
@@ -39,7 +39,7 @@ services:
   spark-master:
     build:
       context: .
-      dockerfile: .devcontainer/Dockerfile
+      dockerfile: docker/Dockerfile
     image: amazon-reviews-sentiment:latest
     container_name: spark-master
     command: >
@@ -65,7 +65,7 @@ services:
   spark-worker:
     build:
       context: .
-      dockerfile: .devcontainer/Dockerfile
+      dockerfile: docker/Dockerfile
     image: amazon-reviews-sentiment:latest
     working_dir: /workspace
     command: >
@@ -86,15 +86,15 @@ services:
       - .:/workspace
 
   # MLflow UI -- browses run/metric/registry history from the bind-mounted
-  # mlruns/ (sqlite backend, see src/config.py MLFLOW_TRACKING_URI).
+  # models/mlruns/ (sqlite backend, see src/config.py MLFLOW_TRACKING_URI).
   mlflow-ui:
     build:
       context: .
-      dockerfile: .devcontainer/Dockerfile
+      dockerfile: docker/Dockerfile
     image: amazon-reviews-sentiment:latest
     container_name: mlflow-ui
     working_dir: /workspace
-    command: mlflow ui --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlruns/mlflow.db
+    command: mlflow ui --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///models/mlruns/mlflow.db
     ports:
       - "5000:5000"
     volumes:
@@ -105,7 +105,7 @@ services:
   api:
     build:
       context: .
-      dockerfile: .devcontainer/Dockerfile
+      dockerfile: docker/Dockerfile
     image: amazon-reviews-sentiment:latest
     container_name: api
     working_dir: /workspace
@@ -143,6 +143,30 @@ services:
     volumes:
       - .:/workspace
 
+  # Web dashboard over logs/api_requests.log -- request counts, status-code
+  # breakdown, top paths, and response-time charts, via GoAccess. Its own
+  # small image (docker/log-viewer.Dockerfile), not the shared
+  # docker/Dockerfile -- GoAccess has nothing to do with the rest of
+  # this project's dependency set. src/scripts/tail_to_clf.py converts our JSON
+  # request log into Combined Log Format on the fly (GoAccess's most
+  # reliable input format -- see that script's docstring for why we don't
+  # feed it raw JSON directly). logs/api_probes.log (health/metrics hits)
+  # is intentionally not fed in here; it's just liveness/scrape traffic.
+  log-viewer:
+    build:
+      context: .
+      dockerfile: docker/log-viewer.Dockerfile
+    container_name: log-viewer
+    working_dir: /workspace
+    command: >
+      sh -c "python3 src/scripts/tail_to_clf.py logs/api_requests.log |
+             goaccess --log-format=COMBINED -o /workspace/logs/log-viewer-report.html
+             --real-time-html --port=7890 --addr=0.0.0.0 --no-global-config -"
+    ports:
+      - "8081:7890"
+    volumes:
+      - .:/workspace
+
   # Training / batch jobs (train.py, evaluate.py, preprocess.py,
   # data_download.py, set_active_model.py). One service, `profiles: [tools]`
   # so it's excluded from a bare `docker compose up` and never auto-starts
@@ -156,7 +180,7 @@ services:
   pipeline:
     build:
       context: .
-      dockerfile: .devcontainer/Dockerfile
+      dockerfile: docker/Dockerfile
     image: amazon-reviews-sentiment:latest
     working_dir: /workspace
     profiles:

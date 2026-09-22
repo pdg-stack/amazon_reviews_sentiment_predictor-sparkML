@@ -3,7 +3,7 @@ Generates the API's secret key, on demand. Never called automatically by
 any other script -- run this once before starting the API for the first
 time (or whenever you want to rotate the key):
 
-    python scripts/generate_api_key.py
+    python src/scripts/generate_api_key.py
 
 Writes API_KEY=<value> into a local .env (gitignored) and prints the key
 once so you can copy it into whatever client calls the API (curl, Postman).
@@ -12,7 +12,7 @@ once so you can copy it into whatever client calls the API (curl, Postman).
 import secrets
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 ENV_PATH = PROJECT_ROOT / ".env"
 
 

@@ -11,13 +11,15 @@ Loads models/active/ (set by set_active_model.py) at startup and keeps the
 SparkSession resident for the life of the process -- fine for demo/dev
 latency, not a high-throughput production pattern (see docs/ARCHITECTURE_NOTES.md).
 
-Every request (except /health and /metrics, to avoid liveness/scrape spam)
-is logged as one JSON line to logs/api_requests.log via the log_requests
-middleware below; /predict calls carry extra detail (input/results/lengths)
-and are tagged "event": "predict" so src/api/drift.py can read them back.
-A background task (started at startup) periodically compares recent
-/predict traffic against a baseline captured at evaluation time -- see
-docs/OBSERVABILITY.md for the full design.
+Every request is logged as one JSON line, via the log_requests middleware
+below. GET /health and GET /metrics (liveness checks / Prometheus scrapes)
+go to logs/api_probes.log; everything else goes to logs/api_requests.log.
+/predict calls carry extra detail (input/results/lengths) and are tagged
+"event": "predict" so src/api/drift.py can read them back; a failed
+/predict call (400/401) still logs the input that was sent, just without
+results. A background task (started at startup) periodically compares
+recent /predict traffic against a baseline captured at evaluation time --
+see docs/OBSERVABILITY.md for the full design.
 
 The model expects a `review_text` field (title + body combined, see
 preprocess.py/docs/model_plan.md) -- /predict accepts an optional `title`/`titles`
@@ -43,7 +45,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
 from src.api import drift
-from src.api.logging_config import app_logger, request_logger
+from src.api.logging_config import app_logger, probe_logger, request_logger
 from src.api.security import require_api_key
 from src.config import ACTIVE_MODEL_DIR, ACTIVE_MODEL_MANIFEST, MLFLOW_TRACKING_URI, PROJECT_ROOT, get_spark_session
 
@@ -146,29 +148,52 @@ async def stop_drift_loop():
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start = time.time()
+
+    # Captured up front so it's available even if the request fails before
+    # predict() ever runs (e.g. a bad API key, rejected by the require_api_key
+    # dependency) -- Starlette caches the body bytes, so the handler can still
+    # read the same body normally afterward.
+    raw_input = None
+    if request.method == "POST" and request.url.path == "/predict":
+        try:
+            raw_input = json.loads(await request.body())
+        except Exception:
+            raw_input = None
+
     try:
         response = await call_next(request)
     except Exception:
         latency_ms = round((time.time() - start) * 1000, 2)
-        request_logger.info(
+        entry = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "event": "access",
+            "method": request.method,
+            "path": request.url.path,
+            "status": 500,
+            "latency_ms": latency_ms,
+        }
+        if raw_input is not None:
+            entry["input"] = raw_input
+        request_logger.info(json.dumps(entry))
+        app_logger.exception(f"Unhandled exception on {request.method} {request.url.path}")
+        raise  # re-raise, never swallow -- ServerErrorMiddleware (above us) still needs this to produce the client's 500
+
+    latency_ms = round((time.time() - start) * 1000, 2)
+
+    if request.url.path in ("/health", "/metrics"):
+        probe_logger.info(
             json.dumps(
                 {
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    "event": "access",
                     "method": request.method,
                     "path": request.url.path,
-                    "status": 500,
+                    "status": response.status_code,
                     "latency_ms": latency_ms,
                 }
             )
         )
-        app_logger.exception(f"Unhandled exception on {request.method} {request.url.path}")
-        raise  # re-raise, never swallow -- ServerErrorMiddleware (above us) still needs this to produce the client's 500
+        return response
 
-    if request.url.path in ("/health", "/metrics"):
-        return response  # liveness probes / scrapes would otherwise flood the log and the drift window
-
-    latency_ms = round((time.time() - start) * 1000, 2)
     predict_detail = getattr(request.state, "predict_detail", None)
     entry = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -180,6 +205,11 @@ async def log_requests(request: Request, call_next):
     }
     if predict_detail:
         entry.update(predict_detail)
+    elif response.status_code >= 400 and raw_input is not None:
+        # A failed /predict call (bad payload, bad key) never reaches the
+        # point where predict() sets predict_detail -- still record what was
+        # sent so a 400/401 entry shows why, not just that it happened.
+        entry["input"] = raw_input
     request_logger.info(json.dumps(entry))
     return response
 

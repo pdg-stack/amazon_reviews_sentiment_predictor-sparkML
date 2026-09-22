@@ -10,8 +10,8 @@ deciding whether to activate it:
     python src/evaluate.py --version 1
     python src/evaluate.py --version 2
 
-Prints accuracy/F1/AUC and writes three charts to reports/ (or
-reports/version_<N>/ when --version is given, so comparisons don't clobber
+Prints accuracy/F1/AUC and writes three charts to docs/reports/ (or
+docs/reports/version_<N>/ when --version is given, so comparisons don't clobber
 each other):
 
   - confusion_matrix.png : where the model's predictions land vs. reality

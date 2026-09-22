@@ -54,7 +54,7 @@ def _reload_running_api(api_url: str) -> None:
     if not api_key:
         print(
             f"--reload-api: no API_KEY found in {PROJECT_ROOT / '.env'} -- "
-            "run scripts/generate_api_key.py first. Skipping API reload."
+            "run src/scripts/generate_api_key.py first. Skipping API reload."
         )
         return
 
