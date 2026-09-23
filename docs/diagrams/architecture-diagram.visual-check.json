@@ -6,9 +6,9 @@
   "status": "pass",
   "visualReview": "pending",
   "artifact": {
-    "path": "D:\\Work\\Code\\amazon_reviews_sentiment_predictor-sparkML\\docs\\architecture-diagram.html",
-    "sha256": "564ded6cf248e178cb4e4ca407bb23d4e66e695decabe4c89fed3599eea0dd91",
-    "bytes": 823320
+    "path": "D:\\Work\\Code\\amazon_reviews_sentiment_predictor-sparkML\\docs\\diagrams\\architecture-diagram.html",
+    "sha256": "b325549b686fbd7fe0a19b4dbf6d7afb5d269564cebf4542856b433242aa43c3",
+    "bytes": 823544
   },
   "state": {
     "detail": "read",
