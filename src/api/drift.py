@@ -7,7 +7,7 @@ isolation (tests/test_drift.py).
 The mechanism, in short:
   1. evaluate.py computes a "baseline" histogram (prediction confidence +
      review length) from the held-out test set and writes it to
-     reports/version_N/baseline_stats.json.
+     docs/reports/version_N/baseline_stats.json.
   2. set_active_model.py copies that file to models/active/BASELINE_STATS.json
      when it activates version N, so the baseline on disk always matches
      whichever model is actually serving traffic.

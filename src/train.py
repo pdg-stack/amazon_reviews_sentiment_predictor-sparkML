@@ -13,11 +13,14 @@ What happens when you run this script:
   2. Split into an 80% training slice and a 20% validation slice.
   3. Print a small, illustrated walkthrough of each pipeline stage on a
      5-row sample, purely for learning -- this doesn't affect the real fit.
-  4. Build the real Pipeline, wrap it in a CrossValidator (k-fold
-     cross-validation + a hyperparameter grid), and fit it on the 80% split.
-  5. Log the whole search (baseline + every grid candidate + the winner) to
-     MLflow, and register the winning model as a new version -- this does
-     NOT change what the API/predict.py currently serve; see
+  4. Build the real Pipeline, then search for good hyperparameters with
+     Optuna: each trial fits once on the 80% split and is scored on the 20%
+     split, and Optuna's sampler picks the next trial's values based on
+     every previous trial's result (unlike a fixed grid, which tries the
+     same points regardless of what earlier points showed).
+  5. Log the whole search (baseline + every trial + the winner) to MLflow,
+     and register the winning model as a new version -- this does NOT
+     change what the API/predict.py currently serve; see
      set_active_model.py for that.
 """
 
@@ -25,6 +28,7 @@ import argparse
 
 import mlflow
 import mlflow.spark
+import optuna
 from pyspark.ml import Pipeline
 from pyspark.ml.classification import LogisticRegression
 from pyspark.ml.evaluation import (
@@ -76,7 +80,7 @@ def print_stage_by_stage_walkthrough(sample_df):
     print("=" * 78)
     print("End of walkthrough. The real Pipeline below repeats these same steps")
     print("(with a production-sized numFeatures) followed by LogisticRegression,")
-    print("run via CrossValidator across the full training split.")
+    print("with its hyperparameters searched by Optuna across the training split.")
     print("=" * 78 + "\n")
 
 
@@ -84,7 +88,8 @@ def build_pipeline():
     """
     The real pipeline, shared by both the untuned baseline and the tuned
     search below. The stage objects (hashing_tf, lr) are returned too, so
-    ParamGridBuilder can target their params directly.
+    each Optuna trial (and the final refit) can set their hyperparameters
+    directly via setNumFeatures()/setRegParam()/setElasticNetParam().
     """
     tokenizer = Tokenizer(inputCol="review_text", outputCol="words")
     remover = StopWordsRemover(inputCol="words", outputCol="filtered_words")
@@ -106,7 +111,7 @@ def evaluate_split(model, df):
     return accuracy, f1, auc
 
 
-def main(sample_fraction: float | None = None, cv_folds: int = 5) -> None:
+def main(sample_fraction: float | None = None, n_trials: int = 30, cv_folds: int = 1) -> None:
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment("amazon_review_sentiment")
 
@@ -118,10 +123,14 @@ def main(sample_fraction: float | None = None, cv_folds: int = 5) -> None:
         print(f"--sample-fraction {sample_fraction}: sampling training data for fast iteration.")
         train_full = train_full.sample(fraction=sample_fraction, seed=42)
 
-    # Step 2: an 80/20 split. CrossValidator folds the 80% split internally
-    # for tuning; the 20% here is a fresh check on the winning model, never
-    # seen by any CV fold. The fully held-out test.parquet (used only by
-    # evaluate.py) is never touched by anything in this file.
+    # Step 2: an 80/20 split. train_split is what every fit (baseline and
+    # every Optuna trial) actually trains on; validation_split is what every
+    # trial is *scored* against, so it's Optuna's search objective, not a
+    # one-time-only check -- worth being explicit about, since it means
+    # validation_split's score is no longer purely untouched-until-the-end
+    # the way a single grid-search sanity check was. The fully held-out
+    # test.parquet (used only by evaluate.py) is never touched by anything in
+    # this file, so it remains the one truly unbiased number.
     train_split, validation_split = train_full.randomSplit([0.8, 0.2], seed=42)
     train_split.cache()
     validation_split.cache()
@@ -138,6 +147,8 @@ def main(sample_fraction: float | None = None, cv_folds: int = 5) -> None:
     with mlflow.start_run(run_name="train_run"):
         mlflow.log_param("sample_fraction", sample_fraction if sample_fraction is not None else 1.0)
         mlflow.log_param("input_field", "review_text (title + body)")
+        mlflow.log_param("tuning_method", "optuna_tpe")
+        mlflow.log_param("n_trials", n_trials)
         mlflow.log_param("cv_folds", cv_folds)
 
         # --- Baseline: default hyperparameters, no tuning. This is the
@@ -159,54 +170,84 @@ def main(sample_fraction: float | None = None, cv_folds: int = 5) -> None:
             )
             print(f"Baseline -> accuracy={b_acc:.4f} f1={b_f1:.4f} auc={b_auc:.4f}")
 
-        # --- Hyperparameter tuning: k-fold cross-validation over a small
-        # grid. Each combination is evaluated on cv_folds folds of
-        # train_split; CrossValidator returns the refit winner plus every
-        # candidate's average metric (cv_model.avgMetrics, aligned with
-        # param_grid). Fewer folds = a noisier but cheaper estimate per
-        # candidate -- useful to know when comparing runs at different
-        # cv_folds settings (see MODEL_HISTORY.md). ---
-        param_grid = (
-            ParamGridBuilder()
-            .addGrid(hashing_tf.numFeatures, [2**16, 2**18])
-            .addGrid(lr.regParam, [0.01, 0.1])
-            .addGrid(lr.elasticNetParam, [0.0, 0.5])
-            .build()
-        )
-        cv = CrossValidator(
-            estimator=pipeline,
-            estimatorParamMaps=param_grid,
-            evaluator=BinaryClassificationEvaluator(labelCol="label", metricName="areaUnderROC"),
-            numFolds=cv_folds,
-            parallelism=2,
-            seed=42,
-        )
+        # --- Hyperparameter tuning: Optuna searches numFeatures/regParam/
+        # elasticNetParam, using its default TPE (Tree-structured Parzen
+        # Estimator) sampler -- unlike a fixed grid, each new trial's values
+        # are chosen based on what every earlier trial scored, so it can
+        # explore a continuous range effectively instead of only a handful
+        # of hand-picked points. binary_evaluator is reused across every
+        # trial (and the final refit below) rather than constructed per call.
+        #
+        # cv_folds controls how each trial is SCORED, independent of how
+        # Optuna picks values:
+        #   - cv_folds <= 1 (default): one fit on train_split, one check on
+        #     validation_split. Cheapest per trial, so n_trials can be large.
+        #   - cv_folds > 1: each trial is k-fold cross-validated instead,
+        #     via CrossValidator with a single-combination param grid (a
+        #     ParamGridBuilder with no .addGrid() calls just evaluates
+        #     whatever's already set on trial_hashing_tf/trial_lr below,
+        #     across cv_folds folds of train_split) -- reusing Spark's own
+        #     fold-splitting rather than hand-rolling it. Worth it mainly
+        #     when training on a small sample, where a single validation
+        #     split would be too small to give a trustworthy score. ---
+        binary_evaluator = BinaryClassificationEvaluator(labelCol="label", metricName="areaUnderROC")
 
-        print(
-            f"\nRunning {cv_folds}-fold cross-validation over {len(param_grid)} hyperparameter "
-            f"combinations ({cv_folds * len(param_grid)} model fits total -- use --sample-fraction "
-            "for a quick test run) ..."
-        )
-        cv_model = cv.fit(train_split)
+        def objective(trial: optuna.Trial) -> float:
+            num_features = trial.suggest_categorical("numFeatures", [2**14, 2**16, 2**18, 2**20])
+            reg_param = trial.suggest_float("regParam", 1e-4, 1.0, log=True)
+            elastic_net_param = trial.suggest_float("elasticNetParam", 0.0, 1.0)
 
-        # Log every grid candidate as its own nested run, so evaluate.py can
-        # chart the whole search landscape, not just the winner.
-        for params, avg_auc in zip(param_grid, cv_model.avgMetrics):
-            readable_params = {p.name: v for p, v in params.items()}
+            trial_pipeline, trial_hashing_tf, trial_lr = build_pipeline()
+            trial_hashing_tf.setNumFeatures(num_features)
+            trial_lr.setRegParam(reg_param)
+            trial_lr.setElasticNetParam(elastic_net_param)
+
+            if cv_folds <= 1:
+                trial_model = trial_pipeline.fit(train_split)
+                auc = binary_evaluator.evaluate(trial_model.transform(validation_split))
+            else:
+                single_combo_grid = ParamGridBuilder().build()
+                cv = CrossValidator(
+                    estimator=trial_pipeline,
+                    estimatorParamMaps=single_combo_grid,
+                    evaluator=binary_evaluator,
+                    numFolds=cv_folds,
+                    seed=42,
+                )
+                auc = cv.fit(train_split).avgMetrics[0]
+
+            # Logged under the SAME run name/metric key the old grid search
+            # used ("cv_candidate"/"cv_avg_auc"), purely so evaluate.py's
+            # existing tuning_improvement chart keeps working unchanged --
+            # despite the name, this is one score per trial (single-split or
+            # k-fold-averaged, depending on cv_folds above), not a fixed
+            # grid's candidate.
             with mlflow.start_run(run_name="cv_candidate", nested=True):
-                mlflow.log_params(readable_params)
-                mlflow.log_metric("cv_avg_auc", avg_auc)
+                mlflow.log_params(
+                    {"numFeatures": num_features, "regParam": reg_param, "elasticNetParam": elastic_net_param}
+                )
+                mlflow.log_metric("cv_avg_auc", auc)
 
-        best_model = cv_model.bestModel
-        best_hashing_tf = best_model.stages[2]
-        best_lr = best_model.stages[4]
-        best_params = {
-            "numFeatures": best_hashing_tf.getNumFeatures(),
-            "regParam": best_lr.getRegParam(),
-            "elasticNetParam": best_lr.getElasticNetParam(),
-        }
+            return auc
+
+        cv_desc = "single-split" if cv_folds <= 1 else f"{cv_folds}-fold CV"
+        print(f"\nRunning Optuna search: {n_trials} trials (TPE sampler, {cv_desc} scoring per trial) ...")
+        study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=42))
+        study.optimize(objective, n_trials=n_trials)
+
+        best_params = study.best_params
         print(f"\nBest hyperparameters found: {best_params}")
         mlflow.log_params({f"best_{k}": v for k, v in best_params.items()})
+
+        # Optuna trials don't keep their fitted PipelineModel around (that
+        # would mean holding n_trials models in memory at once) -- refit once
+        # more with the winning hyperparameters, on the same `pipeline` (and
+        # its hashing_tf/lr stage objects) the baseline fit above already
+        # used, to get the actual model object to evaluate and register below.
+        hashing_tf.setNumFeatures(best_params["numFeatures"])
+        lr.setRegParam(best_params["regParam"])
+        lr.setElasticNetParam(best_params["elasticNetParam"])
+        best_model = pipeline.fit(train_split)
 
         t_acc, t_f1, t_auc = evaluate_split(best_model, validation_split)
         mlflow.log_metrics(
@@ -240,10 +281,20 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--n-trials",
+        type=int,
+        default=30,
+        help="Number of Optuna trials to run (default: 30). Each trial is one pipeline fit.",
+    )
+    parser.add_argument(
         "--cv-folds",
         type=int,
-        default=5,
-        help="Number of cross-validation folds (default: 5). Fewer folds = cheaper but noisier tuning.",
+        default=1,
+        help=(
+            "Cross-validation folds PER TRIAL (default: 1, meaning a single train/validation "
+            "split -- not real cross-validation). Set e.g. 3 to k-fold each trial instead, "
+            "which costs more per trial but gives a more trustworthy score on a small sample."
+        ),
     )
     args = parser.parse_args()
-    main(sample_fraction=args.sample_fraction, cv_folds=args.cv_folds)
+    main(sample_fraction=args.sample_fraction, n_trials=args.n_trials, cv_folds=args.cv_folds)

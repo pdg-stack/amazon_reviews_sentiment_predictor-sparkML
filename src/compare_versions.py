@@ -1,11 +1,11 @@
 """
 Compares several registered model versions' held-out test-set metrics side
 by side, reading the metrics.json files evaluate.py --version N writes to
-reports/version_<N>/. Does not run any Spark job itself -- run
+docs/reports/version_<N>/. Does not run any Spark job itself -- run
 `python src/evaluate.py --version N` for each version first.
 
 Produces:
-  - reports/model_comparison.png : grouped bar chart (accuracy/F1/AUC per version)
+  - docs/reports/model_comparison.png : grouped bar chart (accuracy/F1/AUC per version)
   - a markdown table printed to stdout, ready to paste into MODEL_HISTORY.md
 
 Example:

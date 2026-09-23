@@ -10,8 +10,8 @@ deciding whether to activate it:
     python src/evaluate.py --version 1
     python src/evaluate.py --version 2
 
-Prints accuracy/F1/AUC and writes three charts to reports/ (or
-reports/version_<N>/ when --version is given, so comparisons don't clobber
+Prints accuracy/F1/AUC and writes three charts to docs/reports/ (or
+docs/reports/version_<N>/ when --version is given, so comparisons don't clobber
 each other):
 
   - confusion_matrix.png : where the model's predictions land vs. reality
@@ -41,6 +41,7 @@ import numpy as np
 import seaborn as sns
 from pyspark.ml.evaluation import BinaryClassificationEvaluator, MulticlassClassificationEvaluator
 from pyspark.ml.functions import vector_to_array
+from mlflow import MlflowClient
 from pyspark.sql import functions as F
 
 from src.config import (
@@ -221,7 +222,17 @@ def main(version: int | None = None):
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
     if version is not None:
-        model_uri = f"models:/{MLFLOW_MODEL_NAME}/{version}"
+        # mlflow.spark.load_model() on a registry alias ("models:/name/N")
+        # checks whether the artifact is already reachable on Spark's
+        # distributed filesystem before loading it. Against a real cluster
+        # (spark://spark-master:7077, not local[*]) that check misfires and
+        # its fallback "upload" step leaves an empty metadata directory --
+        # PySpark then raises "ValueError: RDD is empty" trying to read it.
+        # Resolving the alias to its actual artifact path first and loading
+        # THAT sidesteps the check entirely -- the same plain-local-path
+        # style set_active_model.py/predict.py/the API already use
+        # successfully against this same cluster.
+        model_uri = MlflowClient().get_model_version_download_uri(MLFLOW_MODEL_NAME, str(version))
         out_dir = REPORTS_DIR / f"version_{version}"
         label = f"version {version}"
     else:

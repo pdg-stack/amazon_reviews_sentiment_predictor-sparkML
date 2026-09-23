@@ -54,7 +54,7 @@ def _reload_running_api(api_url: str) -> None:
     if not api_key:
         print(
             f"--reload-api: no API_KEY found in {PROJECT_ROOT / '.env'} -- "
-            "run scripts/generate_api_key.py first. Skipping API reload."
+            "run src/scripts/generate_api_key.py first. Skipping API reload."
         )
         return
 
@@ -81,7 +81,14 @@ def main(version: int, reload_api: bool = False, api_url: str = "http://localhos
     model_version = client.get_model_version(MLFLOW_MODEL_NAME, str(version))
     print(f"Activating '{MLFLOW_MODEL_NAME}' version {version} (run_id={model_version.run_id}) ...")
 
-    spark_model = mlflow.spark.load_model(f"models:/{MLFLOW_MODEL_NAME}/{version}")
+    # mlflow.spark.load_model() on a "models:/name/N" registry alias checks
+    # whether the artifact is already reachable on Spark's distributed
+    # filesystem before loading it -- against a real cluster (not local[*])
+    # that check misfires and leaves an empty metadata directory behind
+    # (ValueError: RDD is empty; see the same fix in evaluate.py). Loading
+    # from model_version.source (the alias already resolved to its actual
+    # artifact path, via client.get_model_version() above) sidesteps it.
+    spark_model = mlflow.spark.load_model(model_version.source)
 
     if ACTIVE_MODEL_DIR.exists():
         shutil.rmtree(ACTIVE_MODEL_DIR)
