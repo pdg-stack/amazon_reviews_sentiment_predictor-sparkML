@@ -163,11 +163,15 @@ services:
     # Continuation lines MUST stay at this same indentation, not deeper --
     # see docker-compose.cloud.yml's identical command block for why (a
     # deeper-indented version of this exact block broke it there, confirmed
-    # by testing against the Phase 2 cloud deployment).
+    # by testing against the Phase 2 cloud deployment). --html-refresh=10:
+    # also confirmed there -- --real-time-html alone writes the HTML file
+    # ONCE at startup and leans on the WebSocket for every update after,
+    # so this is the fallback that keeps the file itself current even if a
+    # given browser's WebSocket connection isn't the one actually relied on.
     command: >
       sh -c "python3 src/scripts/tail_to_clf.py logs/api_requests.log |
       goaccess --log-format=COMBINED -o /workspace/logs/log-viewer-report.html
-      --real-time-html --port=7890 --addr=0.0.0.0 --no-global-config -"
+      --real-time-html --html-refresh=10 --port=7890 --addr=0.0.0.0 --no-global-config -"
     ports:
       - "8081:7890"
     volumes:
