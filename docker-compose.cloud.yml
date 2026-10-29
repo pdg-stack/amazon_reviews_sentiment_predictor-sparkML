@@ -22,10 +22,11 @@ services:
       - .env
       - .env.aws
     restart: unless-stopped
+    # The image itself has no src/ -- docker/Dockerfile relies on the repo
+    # being bind-mounted over /workspace at runtime (same as docker-compose.yml's
+    # local dev services), not baked in at build time.
     volumes:
-      - ./models:/workspace/models
-      - ./logs:/workspace/logs
-      - ./docs:/workspace/docs
+      - .:/workspace
 
   mlflow-ui:
     image: amazon-reviews-sentiment:latest
@@ -49,7 +50,7 @@ services:
              --real-time-html --port=7890 --addr=0.0.0.0 --no-global-config -"
     restart: unless-stopped
     volumes:
-      - ./logs:/workspace/logs
+      - .:/workspace
 
   grafana:
     image: grafana/grafana:11.2.0
