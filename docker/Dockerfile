@@ -10,6 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     && rm -rf /var/lib/apt/lists/*
 
+# boto3 is unused locally, but mlflow.spark.load_model() needs it to read
+# s3://-backed artifacts when MLFLOW_ARTIFACT_ROOT points at S3 (Phase 2
+# cloud deployment, via .env.aws) -- not just when a script imports it directly.
 RUN pip install --no-cache-dir \
     pyspark==3.5.3 \
     pandas \
@@ -26,7 +29,8 @@ RUN pip install --no-cache-dir \
     prometheus-fastapi-instrumentator \
     optuna \
     psycopg2-binary \
-    pytest
+    pytest \
+    boto3
 
 # `pip install pyspark` bundles the full Spark distribution (jars, bin/,
 # sbin/) under site-packages/pyspark -- SPARK_HOME points Spark's own
