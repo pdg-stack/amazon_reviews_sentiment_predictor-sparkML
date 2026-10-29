@@ -54,10 +54,19 @@ services:
       dockerfile: docker/log-viewer.Dockerfile
     container_name: log-viewer
     working_dir: /workspace
+    # Continuation lines MUST stay at this same indentation, not deeper (not
+    # visually aligned under the opening quote) -- YAML's folded scalar (>)
+    # only replaces a line break with a space when consecutive lines share
+    # the same indentation; a MORE-indented line keeps its break literal.
+    # A deeper-indented version of this exact block produced a command
+    # string with real embedded newlines, which a shell treats as three
+    # separate statements -- the trailing "|" continues the pipe onto the
+    # next line, but --real-time-html then ran as its own (nonexistent)
+    # command: "sh: --real-time-html: not found", confirmed by testing.
     command: >
       sh -c "python3 src/scripts/tail_to_clf.py logs/api_requests.log |
-             goaccess --log-format=COMBINED -o /workspace/logs/log-viewer-report.html
-             --real-time-html --port=7890 --addr=0.0.0.0 --no-global-config -"
+      goaccess --log-format=COMBINED -o /workspace/logs/log-viewer-report.html
+      --real-time-html --port=7890 --addr=0.0.0.0 --no-global-config -"
     restart: unless-stopped
     volumes:
       - .:/workspace
