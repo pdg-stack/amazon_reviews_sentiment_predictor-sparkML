@@ -33,9 +33,19 @@ services:
     container_name: mlflow-ui
     working_dir: /workspace
     # --static-prefix: see docker/nginx.conf's /mlflow/ location comment.
-    command: mlflow ui --host 0.0.0.0 --port 5000 --static-prefix /mlflow
+    # --allowed-hosts: mlflow 3.x rejects any request whose Host header isn't
+    # localhost/a private IP by default (DNS-rebinding protection) -- CloudFront
+    # forwards its own domain as Host, not the viewer's, so without this every
+    # request arriving through CloudFront gets a 403. CLOUDFRONT_DOMAIN comes
+    # from .env.aws since it changes if the distribution is ever recreated
+    # (see infra/edge.tf's cloudfront_domain output) -- $$ escapes the compose
+    # YAML's own variable substitution so the container's shell expands it
+    # from the env_file below, not tofu/compose at parse time.
+    command: >
+      sh -c "mlflow ui --host 0.0.0.0 --port 5000 --static-prefix /mlflow
+      --allowed-hosts localhost,$$CLOUDFRONT_DOMAIN"
     env_file:
-      - .env.aws  # MLFLOW_TRACKING_URI (RDS) -- mlflow-ui has no other config
+      - .env.aws  # MLFLOW_TRACKING_URI (RDS), CLOUDFRONT_DOMAIN
     restart: unless-stopped
 
   log-viewer:
