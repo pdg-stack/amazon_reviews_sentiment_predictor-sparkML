@@ -28,8 +28,15 @@ def to_clf_line(entry: dict) -> str:
 
 
 def follow(path: str):
+    # No seek-to-end: GoAccess's --real-time-html needs at least one line on
+    # its very first read or it exits with "No input data was provided nor
+    # there's data to restore" rather than waiting -- confirmed by testing,
+    # this crash-looped log-viewer every time it restarted with no traffic
+    # since its last start. Replaying existing history from the beginning
+    # avoids that cold start and is a better default anyway (a fresh
+    # dashboard showing nothing until new traffic arrives isn't more correct,
+    # just emptier).
     with open(path) as f:
-        f.seek(0, 2)  # start at end, like tail -f
         while True:
             line = f.readline()
             if not line:

@@ -46,3 +46,16 @@ output "ec2_public_ip" {
 output "cloudfront_domain" {
   value = aws_cloudfront_distribution.main.domain_name
 }
+
+output "ecr_api_repository_url" {
+  value = aws_ecr_repository.api.repository_url
+}
+
+output "ecr_log_viewer_repository_url" {
+  value = aws_ecr_repository.log_viewer.repository_url
+}
+
+output "github_actions_deploy_role_arn" {
+  description = "Paste into .github/workflows/deploy.yml's role-to-assume."
+  value       = aws_iam_role.github_actions_deploy.arn
+}

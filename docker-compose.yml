@@ -160,10 +160,14 @@ services:
       dockerfile: docker/log-viewer.Dockerfile
     container_name: log-viewer
     working_dir: /workspace
+    # Continuation lines MUST stay at this same indentation, not deeper --
+    # see docker-compose.cloud.yml's identical command block for why (a
+    # deeper-indented version of this exact block broke it there, confirmed
+    # by testing against the Phase 2 cloud deployment).
     command: >
       sh -c "python3 src/scripts/tail_to_clf.py logs/api_requests.log |
-             goaccess --log-format=COMBINED -o /workspace/logs/log-viewer-report.html
-             --real-time-html --port=7890 --addr=0.0.0.0 --no-global-config -"
+      goaccess --log-format=COMBINED -o /workspace/logs/log-viewer-report.html
+      --real-time-html --port=7890 --addr=0.0.0.0 --no-global-config -"
     ports:
       - "8081:7890"
     volumes:
