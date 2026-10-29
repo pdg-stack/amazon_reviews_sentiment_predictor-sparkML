@@ -110,6 +110,7 @@ services:
       - "80:80"
     volumes:
       - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./logs:/workspace/logs:ro # log-viewer-report.html -- see nginx.conf's /logs/ comment
     depends_on:
       - api
       - mlflow-ui
