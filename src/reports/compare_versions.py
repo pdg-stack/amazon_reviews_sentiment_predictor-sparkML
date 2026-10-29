@@ -2,17 +2,17 @@
 Compares several registered model versions' held-out test-set metrics side
 by side, reading the metrics.json files evaluate.py --version N writes to
 docs/reports/version_<N>/. Does not run any Spark job itself -- run
-`python src/evaluate.py --version N` for each version first.
+`python src/pipeline/evaluate.py --version N` for each version first.
 
 Produces:
   - docs/reports/model_comparison.png : grouped bar chart (accuracy/F1/AUC per version)
   - a markdown table printed to stdout, ready to paste into MODEL_HISTORY.md
 
 Example:
-    python src/evaluate.py --version 1
-    python src/evaluate.py --version 2
-    python src/evaluate.py --version 3
-    python src/compare_versions.py --versions 1 2 3
+    python src/pipeline/evaluate.py --version 1
+    python src/pipeline/evaluate.py --version 2
+    python src/pipeline/evaluate.py --version 3
+    python src/reports/compare_versions.py --versions 1 2 3
 """
 
 import argparse
@@ -30,7 +30,7 @@ def _load_metrics(version: int) -> dict:
     path = REPORTS_DIR / f"version_{version}" / "metrics.json"
     if not path.exists():
         raise FileNotFoundError(
-            f"{path} not found -- run `python src/evaluate.py --version {version}` first."
+            f"{path} not found -- run `python src/pipeline/evaluate.py --version {version}` first."
         )
     return json.loads(path.read_text())
 

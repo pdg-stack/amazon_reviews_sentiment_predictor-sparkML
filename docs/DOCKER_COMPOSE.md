@@ -77,11 +77,11 @@ docker compose up -d --scale spark-worker=3 spark-worker
 Batch jobs never start automatically and never share a container with the always-on services — always run as an explicit one-off command:
 
 ```
-docker compose run --rm pipeline python src/data_download.py
-docker compose run --rm pipeline python src/preprocess.py
-docker compose run --rm pipeline python src/train.py --sample-fraction 0.05
-docker compose run --rm pipeline python src/evaluate.py --version 3
-docker compose run --rm pipeline python src/set_active_model.py --version 3
+docker compose run --rm pipeline python src/pipeline/data_download.py
+docker compose run --rm pipeline python src/pipeline/preprocess.py
+docker compose run --rm pipeline python src/pipeline/train.py --sample-fraction 0.05
+docker compose run --rm pipeline python src/pipeline/evaluate.py --version 3
+docker compose run --rm pipeline python src/serving/set_active_model.py --version 3
 ```
 
 `docker compose run` doesn't expose the service's usual ports by default — add `--service-ports` to a specific command if you want to reach that job's driver UI (port 4040) while it's running.

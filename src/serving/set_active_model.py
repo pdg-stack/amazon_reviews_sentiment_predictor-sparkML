@@ -1,20 +1,20 @@
 """
 Explicitly activates ONE specific trained model version for local serving.
 
-Both the FastAPI app (src/api/app.py) and the batch CLI (src/predict.py)
+Both the FastAPI app (src/api/app.py) and the batch CLI (src/serving/predict.py)
 load their model only from models/active/ -- this script is the only thing
 that ever writes to that directory. train.py only ever *registers* new
 versions in MLflow; it never touches models/active/. Switching versions is
 therefore always a deliberate, on-demand, auditable action:
 
-    python src/set_active_model.py --version 3
+    python src/serving/set_active_model.py --version 3
 
 By default the running API does NOT pick this up automatically -- there is
 no background polling/hot-reload by design (see docs/ARCHITECTURE_NOTES.md). To set the
 active version AND have a currently-running API start serving it, in one
 command, add --reload-api:
 
-    python src/set_active_model.py --version 3 --reload-api
+    python src/serving/set_active_model.py --version 3 --reload-api
 
 This calls the API's POST /admin/reload-model endpoint (added for exactly
 this) after activation. If the API isn't reachable (not running, wrong URL,
@@ -113,7 +113,7 @@ def main(version: int, reload_api: bool = False, api_url: str = "http://localhos
             ACTIVE_BASELINE_PATH.unlink()
         print(
             f"No baseline_stats.json found for version {version} -- run "
-            f"`python src/evaluate.py --version {version}` first if you want the API's "
+            f"`python src/pipeline/evaluate.py --version {version}` first if you want the API's "
             "automated drift check to work for this version. It will report 'unavailable' until then."
         )
 

@@ -1,8 +1,8 @@
 {
   "version": 3,
-  "model_uri": "models:/amazon_review_sentiment_predictor/3",
-  "accuracy": 0.8694575,
-  "f1": 0.8694522152420902,
-  "auc": 0.9375816681624993,
-  "evaluated_at": "2026-07-27T12:16:07.158594"
+  "model_uri": "/workspace/models/mlruns/1/8c40a0a796f14fe7a929d6db80d1e51d/artifacts/model",
+  "accuracy": 0.8774629333781776,
+  "f1": 0.8774582459019538,
+  "auc": 0.9430897558835354,
+  "evaluated_at": "2026-09-30T12:13:02.843142"
 }

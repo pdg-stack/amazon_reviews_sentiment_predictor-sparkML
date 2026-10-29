@@ -25,6 +25,7 @@ RUN pip install --no-cache-dir \
     python-dotenv \
     prometheus-fastapi-instrumentator \
     optuna \
+    psycopg2-binary \
     pytest
 
 # `pip install pyspark` bundles the full Spark distribution (jars, bin/,

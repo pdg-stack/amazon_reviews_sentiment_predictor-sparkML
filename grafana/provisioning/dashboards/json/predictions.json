@@ -1,0 +1,53 @@
+{
+  "title": "Predictions",
+  "uid": "predictions",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": { "from": "now-24h", "to": "now" },
+  "refresh": "1m",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Sentiment split",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "app" },
+      "targets": [
+        {
+          "rawSql": "SELECT sentiment, count(*) AS value FROM predictions GROUP BY sentiment",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Confidence distribution",
+      "type": "histogram",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "app" },
+      "targets": [
+        {
+          "rawSql": "SELECT probability FROM predictions",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Predictions per minute",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "app" },
+      "targets": [
+        {
+          "rawSql": "SELECT date_trunc('minute', received_at) AS time, count(*) AS value FROM predictions WHERE $__timeFilter(received_at) GROUP BY 1 ORDER BY 1",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

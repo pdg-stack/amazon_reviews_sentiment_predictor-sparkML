@@ -6,13 +6,15 @@ MAIN ORCHESTRATOR: runs the full pipeline end to end --
 This does NOT call set_active_model.py or start the API -- promoting a
 trained model to "live" and serving it are explicit, on-demand steps by
 design (see docs/ARCHITECTURE_NOTES.md). Each stage is also independently runnable
-(e.g. `python src/train.py --sample-fraction 0.05`) for debugging one step
+(e.g. `python src/pipeline/train.py --sample-fraction 0.05`) for debugging one step
 at a time.
 """
 
+from __future__ import annotations  # `X | None` annotations need this on Python <3.10
+
 import argparse
 
-from src import data_download, evaluate, preprocess, train
+from src.pipeline import data_download, evaluate, preprocess, train
 
 
 def main(skip_download: bool = False, sample_fraction: float | None = None) -> None:
@@ -33,8 +35,8 @@ def main(skip_download: bool = False, sample_fraction: float | None = None) -> N
 
     print(
         "\nPipeline complete. Run `mlflow ui` to browse results, "
-        "`python src/evaluate.py --version N` to compare specific versions on the test set, "
-        "then `python src/set_active_model.py --version N [--reload-api]` to activate one for serving."
+        "`python src/pipeline/evaluate.py --version N` to compare specific versions on the test set, "
+        "then `python src/serving/set_active_model.py --version N [--reload-api]` to activate one for serving."
     )
 
 

@@ -86,7 +86,7 @@ The image already built by `docker/Dockerfile` is the same image a managed Spark
 
 - **A managed Spark platform** — EMR Serverless on AWS (recommended, see above), Databricks, Dataproc on GCP, or Azure's equivalents — running `preprocess.py`/`train.py`/`evaluate.py` as a scheduled job, pointed at the cloud storage paths and tracking server above.
 - **Spark on Kubernetes**, if that's already how you run things — the same image, via the Spark Operator or `spark-submit`, with the same environment variables.
-- **Scheduling**: whatever replaces manually running `python src/run_pipeline.py` — the platform's own scheduler, or a tool like Airflow or GitHub Actions calling into it.
+- **Scheduling**: whatever replaces manually running `python src/pipeline/run_pipeline.py` — the platform's own scheduler, or a tool like Airflow or GitHub Actions calling into it.
 
 ### What doesn't change
 

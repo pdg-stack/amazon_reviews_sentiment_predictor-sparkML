@@ -110,6 +110,10 @@ services:
     container_name: api
     working_dir: /workspace
     command: uvicorn src.api.app:app --host 0.0.0.0 --port 8000
+    env_file:
+      - .env
+      - path: .env.aws  # cloud config (RDS/S3) -- optional, absent locally by default; see .env.aws
+        required: false
     environment:
       SPARK_MASTER_URL: spark://spark-master:7077
       # Standalone Spark's default is "an app gets every available core,
@@ -127,13 +131,11 @@ services:
       # this itself (it prepends cwd to sys.path before importing), which is
       # why `api` didn't strictly need this -- set here anyway for
       # consistency/robustness. `pipeline` (below) DOES need it: plain
-      # `python src/train.py`-style invocations do NOT get cwd added to
-      # sys.path automatically (only the script's own directory, src/, is
-      # -- verified by testing; `python src/evaluate.py` fails with
-      # `ModuleNotFoundError: No module named 'src'` without this).
+      # `python src/pipeline/train.py`-style invocations do NOT get cwd
+      # added to sys.path automatically (only the script's own directory
+      # is -- verified by testing; `python src/pipeline/evaluate.py` fails
+      # with `ModuleNotFoundError: No module named 'src'` without this).
       PYTHONPATH: /workspace
-    env_file:
-      - .env  # provides API_KEY (python-dotenv also loads this at startup; both are belt-and-suspenders)
     depends_on:
       - spark-master
       - spark-worker
@@ -172,11 +174,11 @@ services:
   # so it's excluded from a bare `docker compose up` and never auto-starts
   # or competes with the always-on UI/API containers for resources. Run
   # on-demand:
-  #   docker compose run --rm pipeline python src/train.py --sample-fraction 0.05
-  #   docker compose run --rm pipeline python src/evaluate.py --version 3
-  #   docker compose run --rm pipeline python src/preprocess.py
-  #   docker compose run --rm pipeline python src/data_download.py
-  #   docker compose run --rm pipeline python src/set_active_model.py --version 3
+  #   docker compose run --rm pipeline python src/pipeline/train.py --sample-fraction 0.05
+  #   docker compose run --rm pipeline python src/pipeline/evaluate.py --version 3
+  #   docker compose run --rm pipeline python src/pipeline/preprocess.py
+  #   docker compose run --rm pipeline python src/pipeline/data_download.py
+  #   docker compose run --rm pipeline python src/serving/set_active_model.py --version 3
   pipeline:
     build:
       context: .
@@ -188,12 +190,14 @@ services:
     environment:
       SPARK_MASTER_URL: spark://spark-master:7077
       # See the longer comment on `api`'s PYTHONPATH above -- required here
-      # so plain `python src/train.py`-style invocations (matching the
-      # README's documented command shape) can resolve `from src.config
+      # so plain `python src/pipeline/train.py`-style invocations (matching
+      # the README's documented command shape) can resolve `from src.config
       # import ...`.
       PYTHONPATH: /workspace
     env_file:
       - .env
+      - path: .env.aws  # cloud config (RDS/S3) -- optional, absent locally by default; see .env.aws
+        required: false
     depends_on:
       - spark-master
       - spark-worker

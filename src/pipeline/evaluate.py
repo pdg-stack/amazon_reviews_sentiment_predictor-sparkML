@@ -7,8 +7,8 @@ registered MLflow version directly, without touching models/active/ -- e.g.
 to compare a newly trained candidate against the current version before
 deciding whether to activate it:
 
-    python src/evaluate.py --version 1
-    python src/evaluate.py --version 2
+    python src/pipeline/evaluate.py --version 1
+    python src/pipeline/evaluate.py --version 2
 
 Prints accuracy/F1/AUC and writes three charts to docs/reports/ (or
 docs/reports/version_<N>/ when --version is given, so comparisons don't clobber
@@ -28,6 +28,8 @@ histograms used by the API's automated drift check once this version is
 activated (see set_active_model.py, src/api/drift.py, docs/OBSERVABILITY.md).
 """
 
+from __future__ import annotations  # `X | None` annotations need this on Python <3.10 (EMR Serverless's base image)
+
 import argparse
 import datetime
 import json
@@ -46,6 +48,7 @@ from pyspark.sql import functions as F
 
 from src.config import (
     ACTIVE_MODEL_DIR,
+    ACTIVE_MODEL_MANIFEST,
     MLFLOW_MODEL_NAME,
     MLFLOW_TRACKING_URI,
     REPORTS_DIR,
@@ -131,21 +134,30 @@ def plot_tuning_improvement(out_path):
     """
     runs = mlflow.search_runs(experiment_names=["amazon_review_sentiment"])
     if runs.empty:
-        print("No MLflow runs found yet -- run src/train.py first. Skipping tuning-improvement chart.")
+        print("No MLflow runs found yet -- run src/pipeline/train.py first. Skipping tuning-improvement chart.")
         return
 
     run_name_col = "tags.mlflow.runName"
     baseline_runs = runs[runs[run_name_col] == "baseline"]
-    candidate_runs = runs[runs[run_name_col] == "cv_candidate"]
+    # Trial-level runs are named "run<N>" (cv_folds<=1) or "run<N>" +
+    # "run<N>_cv<K>" children (cv_folds>1) -- see train.py. Match only the
+    # per-trial parent ("run<N>"), not its cv<K> children, so each trial
+    # counts once regardless of cv_folds.
+    trial_runs = runs[runs[run_name_col].str.match(r"^run\d+$", na=False)]
     parent_runs = runs[runs[run_name_col] == "train_run"]
 
     if baseline_runs.empty or parent_runs.empty:
-        print("Incomplete MLflow history -- run src/train.py first. Skipping tuning-improvement chart.")
+        print("Incomplete MLflow history -- run src/pipeline/train.py first. Skipping tuning-improvement chart.")
         return
 
     baseline_auc = baseline_runs.iloc[-1]["metrics.validation_auc"]
     tuned_auc = parent_runs.iloc[-1]["metrics.validation_auc"]
-    candidate_aucs = candidate_runs["metrics.cv_avg_auc"].dropna().tolist()
+    # cv_folds<=1 trials log "auc"; cv_folds>1 trials log "auc_mean" on their
+    # "run<N>" parent instead (see train.py) -- a given training run only
+    # ever populates one of the two, so concatenating both is safe.
+    single_split_aucs = trial_runs["metrics.auc"].dropna().tolist() if "metrics.auc" in trial_runs.columns else []
+    cv_mean_aucs = trial_runs["metrics.auc_mean"].dropna().tolist() if "metrics.auc_mean" in trial_runs.columns else []
+    candidate_aucs = single_split_aucs + cv_mean_aucs
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
 
@@ -218,9 +230,11 @@ def save_baseline_stats(predictions, out_path, n_bins: int = 20):
     out_path.write_text(json.dumps(baseline, indent=2))
 
 
-def main(version: int | None = None):
+def main(version: int | None = None, test_path: str | None = None):
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    mlflow.set_experiment("amazon_review_sentiment")
 
+    parent_run_id = None
     if version is not None:
         # mlflow.spark.load_model() on a registry alias ("models:/name/N")
         # checks whether the artifact is already reachable on Spark's
@@ -229,16 +243,21 @@ def main(version: int | None = None):
         # its fallback "upload" step leaves an empty metadata directory --
         # PySpark then raises "ValueError: RDD is empty" trying to read it.
         # Resolving the alias to its actual artifact path first and loading
-        # THAT sidesteps the check entirely -- the same plain-local-path
-        # style set_active_model.py/predict.py/the API already use
-        # successfully against this same cluster.
-        model_uri = MlflowClient().get_model_version_download_uri(MLFLOW_MODEL_NAME, str(version))
+        # THAT sidesteps the check entirely -- the same approach
+        # set_active_model.py already uses successfully against this same
+        # cluster. .source also gives run_id for free, to link the test_run
+        # logged below back to the training run that produced this version.
+        model_version = MlflowClient().get_model_version(MLFLOW_MODEL_NAME, str(version))
+        model_uri = model_version.source
+        parent_run_id = model_version.run_id
         out_dir = REPORTS_DIR / f"version_{version}"
         label = f"version {version}"
     else:
         model_uri = str(ACTIVE_MODEL_DIR)
         out_dir = REPORTS_DIR
         label = "active model"
+        if ACTIVE_MODEL_MANIFEST.exists():
+            parent_run_id = json.loads(ACTIVE_MODEL_MANIFEST.read_text()).get("run_id")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     spark = get_spark_session("evaluate")
@@ -246,12 +265,26 @@ def main(version: int | None = None):
     print(f"Loading {label} from {model_uri} ...")
     model = mlflow.spark.load_model(model_uri)
 
-    print(f"Loading {TEST_PARQUET} ...")
-    test_df = spark.read.parquet(str(TEST_PARQUET))
+    input_path = test_path or str(TEST_PARQUET)
+    print(f"Loading {input_path} ...")
+    test_df = spark.read.parquet(input_path)
     predictions = model.transform(test_df).cache()
 
     accuracy, f1, auc = compute_metrics(predictions)
     print(f"Test set ({label}) -> accuracy={accuracy:.4f} f1={f1:.4f} auc={auc:.4f}")
+
+    # A real MLflow run for this evaluation -- previously this script only
+    # wrote local JSON/PNGs and never touched MLflow at all, so the held-out
+    # test-set numbers were invisible from the tracking UI. Nested under the
+    # training run that produced this version when known (parent_run_id
+    # above), so it shows up right alongside that run's own trials.
+    test_row_count = test_df.count()
+    run_tags = {"mlflow.parentRunId": parent_run_id} if parent_run_id else {}
+    with mlflow.start_run(run_name="test_run", tags=run_tags):
+        mlflow.log_param("evaluated_version", version if version is not None else "active")
+        mlflow.log_param("test_source", input_path)
+        mlflow.log_param("test_row_count", test_row_count)
+        mlflow.log_metrics({"test_accuracy": accuracy, "test_f1": f1, "test_auc": auc})
 
     plot_confusion_matrix(predictions, out_dir / "confusion_matrix.png")
     plot_roc_curve(predictions, auc, out_dir / "roc_curve.png")
@@ -288,5 +321,15 @@ if __name__ == "__main__":
         default=None,
         help="Evaluate this specific registered MLflow version instead of the active model.",
     )
+    parser.add_argument(
+        "--test-path",
+        type=str,
+        default=None,
+        help=(
+            "Score against this path instead of data/processed/test.parquet -- a local path "
+            "or an s3://... URI (e.g. a held-out slice from a cloud run's own sample/split, "
+            "kept separate from the official test set)."
+        ),
+    )
     args = parser.parse_args()
-    main(version=args.version)
+    main(version=args.version, test_path=args.test_path)

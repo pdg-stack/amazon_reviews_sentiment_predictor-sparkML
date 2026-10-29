@@ -37,8 +37,29 @@ MLFLOW_DB_PATH = MLRUNS_DIR / "mlflow.db"  # run/metric/registry metadata -- kep
 # -- everything set_active_model.py relies on) and MLflow 3.x additionally
 # refuses to open it at all without an opt-in env var. SQLite is the
 # lightest backend that supports the registry, with no separate server to run.
-MLFLOW_TRACKING_URI = f"sqlite:///{MLFLOW_DB_PATH}"
+# Overridable so a cloud run can point this at RDS Postgres instead -- no env
+# var set = this same local sqlite file, unchanged.
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", f"sqlite:///{MLFLOW_DB_PATH}")
 MLFLOW_MODEL_NAME = "amazon_review_sentiment_predictor"
+
+# Only meaningful the first time a given MLFLOW_TRACKING_URI's experiment is
+# created (e.g. a brand-new RDS backend) -- an S3 URI so a fresh cloud
+# tracking store doesn't fall back to writing model artifacts onto whatever
+# ephemeral local disk the training job happened to run on. Unset locally;
+# an experiment that already exists (the normal local case) keeps whatever
+# artifact_location it already has, this is never applied retroactively.
+MLFLOW_ARTIFACT_ROOT = os.environ.get("MLFLOW_ARTIFACT_ROOT")
+
+# The `app` database (predictions, drift_checks -- Phase 2/3), on the same
+# RDS instance as MLflow's `mlflow` database but as its own database/user.
+# Unset locally by default -- src/api/db.py treats that as "no app DB
+# configured" and every predictions/drift-check write or query becomes a
+# no-op, so local dev (no RDS) keeps working exactly as before.
+APP_DB_HOST = os.environ.get("APP_DB_HOST")
+APP_DB_PORT = int(os.environ.get("APP_DB_PORT", "5432"))
+APP_DB_NAME = os.environ.get("APP_DB_NAME", "app")
+APP_DB_USER = os.environ.get("APP_DB_USER")
+APP_DB_PASSWORD = os.environ.get("APP_DB_PASSWORD")
 
 TRAIN_CSV = DATA_RAW_DIR / "train.csv"
 TEST_CSV = DATA_RAW_DIR / "test.csv"

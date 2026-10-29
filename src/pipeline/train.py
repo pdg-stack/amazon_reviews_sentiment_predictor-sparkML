@@ -24,7 +24,10 @@ What happens when you run this script:
      set_active_model.py for that.
 """
 
+from __future__ import annotations  # `X | None` annotations need this on Python <3.10 (EMR Serverless's base image)
+
 import argparse
+import functools
 
 import mlflow
 import mlflow.spark
@@ -36,9 +39,14 @@ from pyspark.ml.evaluation import (
     MulticlassClassificationEvaluator,
 )
 from pyspark.ml.feature import HashingTF, IDF, StopWordsRemover, Tokenizer
-from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
 
-from src.config import MLFLOW_MODEL_NAME, MLFLOW_TRACKING_URI, TRAIN_PARQUET, get_spark_session
+from src.config import (
+    MLFLOW_ARTIFACT_ROOT,
+    MLFLOW_MODEL_NAME,
+    MLFLOW_TRACKING_URI,
+    TRAIN_PARQUET,
+    get_spark_session,
+)
 
 
 def print_stage_by_stage_walkthrough(sample_df):
@@ -111,14 +119,26 @@ def evaluate_split(model, df):
     return accuracy, f1, auc
 
 
-def main(sample_fraction: float | None = None, n_trials: int = 30, cv_folds: int = 1) -> None:
+def main(
+    sample_fraction: float | None = None,
+    n_trials: int = 30,
+    cv_folds: int = 1,
+    train_path: str | None = None,
+) -> None:
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    # MLFLOW_ARTIFACT_ROOT only matters the FIRST time this experiment is
+    # created against a given tracking store (e.g. a brand-new RDS backend) --
+    # an experiment that already exists (the normal local case, or a second
+    # cloud run) keeps whatever artifact_location it was created with.
+    if mlflow.get_experiment_by_name("amazon_review_sentiment") is None and MLFLOW_ARTIFACT_ROOT:
+        mlflow.create_experiment("amazon_review_sentiment", artifact_location=MLFLOW_ARTIFACT_ROOT)
     mlflow.set_experiment("amazon_review_sentiment")
 
     spark = get_spark_session("train")
 
-    print(f"Loading {TRAIN_PARQUET} ...")
-    train_full = spark.read.parquet(str(TRAIN_PARQUET))
+    input_path = train_path or str(TRAIN_PARQUET)
+    print(f"Loading {input_path} ...")
+    train_full = spark.read.parquet(input_path)
     if sample_fraction is not None:
         print(f"--sample-fraction {sample_fraction}: sampling training data for fast iteration.")
         train_full = train_full.sample(fraction=sample_fraction, seed=42)
@@ -134,10 +154,16 @@ def main(sample_fraction: float | None = None, n_trials: int = 30, cv_folds: int
     train_split, validation_split = train_full.randomSplit([0.8, 0.2], seed=42)
     train_split.cache()
     validation_split.cache()
-    print(
-        f"Train split: {train_split.count()} rows | "
-        f"Validation split: {validation_split.count()} rows"
-    )
+    train_rows, validation_rows = train_split.count(), validation_split.count()
+    print(f"Train split: {train_rows} rows | Validation split: {validation_rows} rows")
+
+    # Pre-split train_split into cv_folds disjoint folds ONCE, reused by every
+    # trial's objective() call below -- cached since each fold is read
+    # cv_folds-1 times per trial (as part of some other fold's training set)
+    # across all n_trials trials. Only built when actually needed.
+    folds = None
+    if cv_folds > 1:
+        folds = [f.cache() for f in train_split.randomSplit([1.0 / cv_folds] * cv_folds, seed=42)]
 
     # Step 3: purely educational, doesn't affect the real fit below.
     print_stage_by_stage_walkthrough(train_full.limit(5))
@@ -145,15 +171,26 @@ def main(sample_fraction: float | None = None, n_trials: int = 30, cv_folds: int
     pipeline, hashing_tf, lr = build_pipeline()
 
     with mlflow.start_run(run_name="train_run"):
-        mlflow.log_param("sample_fraction", sample_fraction if sample_fraction is not None else 1.0)
+        # `train_source` records exactly what data this run trained on --
+        # the actual file/path used, not just a fraction, so a --train-path
+        # override (a pre-sampled cloud file, e.g.) is never mislabeled as
+        # "the full dataset" the way a bare sample_fraction=1.0 would read.
+        mlflow.log_param("train_source", input_path)
+        if sample_fraction is not None:
+            mlflow.log_param("sample_fraction", sample_fraction)
+        mlflow.log_param("train_split_rows", train_rows)
+        mlflow.log_param("validation_split_rows", validation_rows)
         mlflow.log_param("input_field", "review_text (title + body)")
         mlflow.log_param("tuning_method", "optuna_tpe")
+        mlflow.log_param("optimization_metric", "auc (areaUnderROC)")
         mlflow.log_param("n_trials", n_trials)
         mlflow.log_param("cv_folds", cv_folds)
 
         # --- Baseline: default hyperparameters, no tuning. This is the
         # "before" side of the before/after tuning-improvement chart in
-        # evaluate.py. ---
+        # evaluate.py. Logged both to its own nested run (below) AND, with a
+        # baseline_ prefix, directly on this parent run -- so it's visible
+        # at a glance without drilling into a child run. ---
         print("\nFitting untuned baseline (default hyperparameters) ...")
         with mlflow.start_run(run_name="baseline", nested=True):
             baseline_model = pipeline.fit(train_split)
@@ -168,67 +205,98 @@ def main(sample_fraction: float | None = None, n_trials: int = 30, cv_folds: int
             mlflow.log_metrics(
                 {"validation_accuracy": b_acc, "validation_f1": b_f1, "validation_auc": b_auc}
             )
+            # Not registered (no registered_model_name) -- only the final
+            # winning model below becomes a registry version. This is just
+            # this run's own artifact, browsable/downloadable from its page.
+            mlflow.spark.log_model(baseline_model, "model")
             print(f"Baseline -> accuracy={b_acc:.4f} f1={b_f1:.4f} auc={b_auc:.4f}")
+        mlflow.log_metrics(
+            {"baseline_accuracy": b_acc, "baseline_f1": b_f1, "baseline_auc": b_auc}
+        )
 
         # --- Hyperparameter tuning: Optuna searches numFeatures/regParam/
         # elasticNetParam, using its default TPE (Tree-structured Parzen
         # Estimator) sampler -- unlike a fixed grid, each new trial's values
         # are chosen based on what every earlier trial scored, so it can
         # explore a continuous range effectively instead of only a handful
-        # of hand-picked points. binary_evaluator is reused across every
-        # trial (and the final refit below) rather than constructed per call.
+        # of hand-picked points. The metric being optimized throughout is
+        # AUC (areaUnderROC) -- see optimization_metric above.
         #
-        # cv_folds controls how each trial is SCORED, independent of how
-        # Optuna picks values:
-        #   - cv_folds <= 1 (default): one fit on train_split, one check on
-        #     validation_split. Cheapest per trial, so n_trials can be large.
-        #   - cv_folds > 1: each trial is k-fold cross-validated instead,
-        #     via CrossValidator with a single-combination param grid (a
-        #     ParamGridBuilder with no .addGrid() calls just evaluates
-        #     whatever's already set on trial_hashing_tf/trial_lr below,
-        #     across cv_folds folds of train_split) -- reusing Spark's own
-        #     fold-splitting rather than hand-rolling it. Worth it mainly
-        #     when training on a small sample, where a single validation
-        #     split would be too small to give a trustworthy score. ---
+        # Every trial is its own nested MLflow run, "run<trial number>"
+        # (1-indexed), holding that trial's hyperparameters and its own
+        # fitted model artifact (unregistered -- only the final winner below
+        # becomes a registry version; every other logged model here is
+        # browsable/downloadable from its own run page only):
+        #   - cv_folds <= 1 (default): "run<N>" alone holds the single
+        #     train/validation-split auc + that fit's model. Cheapest per
+        #     trial, so n_trials can be large.
+        #   - cv_folds > 1: "run<N>" is itself a parent for cv_folds child
+        #     runs, "run<N>_cv<K>" (1-indexed), each one fold's own fit +
+        #     auc + model on that fold -- hand-rolled (not Spark's
+        #     CrossValidator, which only exposes an already-averaged score
+        #     and discards each fold's model) specifically so each fold is
+        #     individually visible/comparable in MLflow, not just the
+        #     average. "run<N>" itself then holds the params plus auc_mean
+        #     and one auc_fold<K> per fold (no model of its own -- each
+        #     fold's model lives on its own "run<N>_cv<K>" run). Worth the
+        #     extra cost mainly when training on a small sample, where a single
+        #     validation split would be too small to give a trustworthy
+        #     score. ---
         binary_evaluator = BinaryClassificationEvaluator(labelCol="label", metricName="areaUnderROC")
+
+        def fit_and_score(train_df, eval_df, num_features, reg_param, elastic_net_param):
+            fold_pipeline, fold_hashing_tf, fold_lr = build_pipeline()
+            fold_hashing_tf.setNumFeatures(num_features)
+            fold_lr.setRegParam(reg_param)
+            fold_lr.setElasticNetParam(elastic_net_param)
+            fold_model = fold_pipeline.fit(train_df)
+            auc = binary_evaluator.evaluate(fold_model.transform(eval_df))
+            return fold_model, auc
 
         def objective(trial: optuna.Trial) -> float:
             num_features = trial.suggest_categorical("numFeatures", [2**14, 2**16, 2**18, 2**20])
             reg_param = trial.suggest_float("regParam", 1e-4, 1.0, log=True)
             elastic_net_param = trial.suggest_float("elasticNetParam", 0.0, 1.0)
+            trial_params = {
+                "numFeatures": num_features,
+                "regParam": reg_param,
+                "elasticNetParam": elastic_net_param,
+            }
+            run_label = f"run{trial.number + 1}"
 
-            trial_pipeline, trial_hashing_tf, trial_lr = build_pipeline()
-            trial_hashing_tf.setNumFeatures(num_features)
-            trial_lr.setRegParam(reg_param)
-            trial_lr.setElasticNetParam(elastic_net_param)
+            with mlflow.start_run(run_name=run_label, nested=True):
+                mlflow.log_params(trial_params)
 
-            if cv_folds <= 1:
-                trial_model = trial_pipeline.fit(train_split)
-                auc = binary_evaluator.evaluate(trial_model.transform(validation_split))
-            else:
-                single_combo_grid = ParamGridBuilder().build()
-                cv = CrossValidator(
-                    estimator=trial_pipeline,
-                    estimatorParamMaps=single_combo_grid,
-                    evaluator=binary_evaluator,
-                    numFolds=cv_folds,
-                    seed=42,
-                )
-                auc = cv.fit(train_split).avgMetrics[0]
+                if cv_folds <= 1:
+                    model, auc = fit_and_score(
+                        train_split, validation_split, num_features, reg_param, elastic_net_param
+                    )
+                    mlflow.log_metric("auc", auc)
+                    mlflow.spark.log_model(model, "model")
+                    return auc
 
-            # Logged under the SAME run name/metric key the old grid search
-            # used ("cv_candidate"/"cv_avg_auc"), purely so evaluate.py's
-            # existing tuning_improvement chart keeps working unchanged --
-            # despite the name, this is one score per trial (single-split or
-            # k-fold-averaged, depending on cv_folds above), not a fixed
-            # grid's candidate.
-            with mlflow.start_run(run_name="cv_candidate", nested=True):
-                mlflow.log_params(
-                    {"numFeatures": num_features, "regParam": reg_param, "elasticNetParam": elastic_net_param}
-                )
-                mlflow.log_metric("cv_avg_auc", auc)
+                fold_aucs = []
+                for fold_idx in range(cv_folds):
+                    val_fold = folds[fold_idx]
+                    train_fold = functools.reduce(
+                        lambda a, b: a.union(b),
+                        [f for i, f in enumerate(folds) if i != fold_idx],
+                    )
+                    fold_model, fold_auc = fit_and_score(
+                        train_fold, val_fold, num_features, reg_param, elastic_net_param
+                    )
+                    fold_aucs.append(fold_auc)
+                    with mlflow.start_run(run_name=f"{run_label}_cv{fold_idx + 1}", nested=True):
+                        mlflow.log_params(trial_params)
+                        mlflow.log_param("fold", fold_idx + 1)
+                        mlflow.log_metric("auc", fold_auc)
+                        mlflow.spark.log_model(fold_model, "model")
 
-            return auc
+                avg_auc = sum(fold_aucs) / len(fold_aucs)
+                mlflow.log_metric("auc_mean", avg_auc)
+                for i, fold_auc in enumerate(fold_aucs):
+                    mlflow.log_metric(f"auc_fold{i + 1}", fold_auc)
+                return avg_auc
 
         cv_desc = "single-split" if cv_folds <= 1 else f"{cv_folds}-fold CV"
         print(f"\nRunning Optuna search: {n_trials} trials (TPE sampler, {cv_desc} scoring per trial) ...")
@@ -238,6 +306,7 @@ def main(sample_fraction: float | None = None, n_trials: int = 30, cv_folds: int
         best_params = study.best_params
         print(f"\nBest hyperparameters found: {best_params}")
         mlflow.log_params({f"best_{k}": v for k, v in best_params.items()})
+        mlflow.log_metric("best_trial_auc", study.best_value)
 
         # Optuna trials don't keep their fitted PipelineModel around (that
         # would mean holding n_trials models in memory at once) -- refit once
@@ -262,7 +331,7 @@ def main(sample_fraction: float | None = None, n_trials: int = 30, cv_folds: int
         print(f"\nRegistered new model version under '{MLFLOW_MODEL_NAME}'.")
         print(f"Browse it with: mlflow ui --backend-store-uri {MLFLOW_TRACKING_URI}")
         print(
-            "Run `python src/set_active_model.py --version N` to make a specific "
+            "Run `python src/serving/set_active_model.py --version N` to make a specific "
             "version the one predict.py/the API actually use."
         )
 
@@ -296,5 +365,20 @@ if __name__ == "__main__":
             "which costs more per trial but gives a more trustworthy score on a small sample."
         ),
     )
+    parser.add_argument(
+        "--train-path",
+        type=str,
+        default=None,
+        help=(
+            "Read training data from this path instead of data/processed/train.parquet -- "
+            "a local path or an s3://... URI (e.g. for a pre-sampled/pre-split cloud run). "
+            "Spark reads it directly, so any Spark-supported URI scheme works."
+        ),
+    )
     args = parser.parse_args()
-    main(sample_fraction=args.sample_fraction, n_trials=args.n_trials, cv_folds=args.cv_folds)
+    main(
+        sample_fraction=args.sample_fraction,
+        n_trials=args.n_trials,
+        cv_folds=args.cv_folds,
+        train_path=args.train_path,
+    )

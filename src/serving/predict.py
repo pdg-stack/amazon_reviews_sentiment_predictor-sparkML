@@ -10,9 +10,11 @@ it's used as-is; otherwise it's built here from --text-col (required) and
 training time.
 
 Examples:
-    python src/predict.py --input data/processed/test.parquet --output predictions.csv
-    python src/predict.py --input reviews.csv --text-col body --title-col headline --output out.csv
+    python src/serving/predict.py --input data/processed/test.parquet --output predictions.csv
+    python src/serving/predict.py --input reviews.csv --text-col body --title-col headline --output out.csv
 """
+
+from __future__ import annotations  # `X | None` annotations need this on Python <3.10
 
 import argparse
 

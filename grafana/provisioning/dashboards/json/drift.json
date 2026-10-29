@@ -1,0 +1,66 @@
+{
+  "title": "Drift",
+  "uid": "drift",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": { "from": "now-7d", "to": "now" },
+  "refresh": "5m",
+  "panels": [
+    {
+      "id": 1,
+      "title": "PSI per signal over time",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "app" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "thresholdsStyle": { "mode": "line" } },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.1 },
+              { "color": "red", "value": 0.25 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT checked_at AS time, prediction_confidence_psi, review_length_psi FROM drift_checks ORDER BY checked_at",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Status over time",
+      "type": "state-timeline",
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "app" },
+      "targets": [
+        {
+          "rawSql": "SELECT checked_at AS time, status AS value FROM drift_checks ORDER BY checked_at",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Sample size per check",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 9 },
+      "datasource": { "type": "postgres", "uid": "app" },
+      "targets": [
+        {
+          "rawSql": "SELECT checked_at AS time, sample_size FROM drift_checks ORDER BY checked_at",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

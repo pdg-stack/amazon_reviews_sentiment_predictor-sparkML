@@ -1,0 +1,86 @@
+# Phase 2/3 cloud serving stack -- runs on the EC2 instance provisioned in
+# infra/ec2.tf, NOT locally. No spark-master/spark-worker/pipeline here
+# (EMR Serverless handles training, Phase 1) -- api runs its own embedded
+# local[*] Spark session, same as .devcontainer/local dev, since inference
+# is small-batch and doesn't need a cluster.
+#
+# Deploy (see docs/DEPLOYMENT.md for the full sequence): sync the repo to
+# this instance, then `docker compose -f docker-compose.cloud.yml up -d --build`.
+# Env comes from .env + .env.aws (same files/convention as local dev's
+# optional .env.aws -- see docker-compose.yml's own comment on that).
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: amazon-reviews-sentiment:latest
+    container_name: api
+    working_dir: /workspace
+    command: uvicorn src.api.app:app --host 0.0.0.0 --port 8000
+    env_file:
+      - .env
+      - .env.aws
+    restart: unless-stopped
+    volumes:
+      - ./models:/workspace/models
+      - ./logs:/workspace/logs
+      - ./docs:/workspace/docs
+
+  mlflow-ui:
+    image: amazon-reviews-sentiment:latest
+    container_name: mlflow-ui
+    working_dir: /workspace
+    # --static-prefix: see docker/nginx.conf's /mlflow/ location comment.
+    command: mlflow ui --host 0.0.0.0 --port 5000 --static-prefix /mlflow
+    env_file:
+      - .env.aws  # MLFLOW_TRACKING_URI (RDS) -- mlflow-ui has no other config
+    restart: unless-stopped
+
+  log-viewer:
+    build:
+      context: .
+      dockerfile: docker/log-viewer.Dockerfile
+    container_name: log-viewer
+    working_dir: /workspace
+    command: >
+      sh -c "python3 src/scripts/tail_to_clf.py logs/api_requests.log |
+             goaccess --log-format=COMBINED -o /workspace/logs/log-viewer-report.html
+             --real-time-html --port=7890 --addr=0.0.0.0 --no-global-config -"
+    restart: unless-stopped
+    volumes:
+      - ./logs:/workspace/logs
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      # RDS `app` schema is the one and only datasource (provisioned below) --
+      # no separate login flow needed for a single-operator dashboard.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+    env_file:
+      - .env.aws  # APP_DB_* -- read by grafana/provisioning/datasources/app_db.yml
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - grafana-data:/var/lib/grafana
+
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+      - mlflow-ui
+      - log-viewer
+      - grafana
+
+volumes:
+  grafana-data:

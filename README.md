@@ -31,7 +31,7 @@ In VS Code: Command Palette → **Dev Containers: Reopen in Container**. The fir
 ## 3. Get the data and run the pipeline
 
 ```
-python src/run_pipeline.py
+python src/pipeline/run_pipeline.py
 ```
 
 This runs, in order: `data_download.py` → `preprocess.py` → `train.py` → `evaluate.py`. You can also run each stage on its own (see each script's `--help`); a few useful flags:
@@ -53,14 +53,14 @@ Neither notebook runs automatically — open and run them yourself whenever you'
 
 ```
 mlflow ui --port 5000 --backend-store-uri sqlite:///models/mlruns/mlflow.db   # browse runs, metrics, and versions in a browser
-python src/evaluate.py --version 1   # metrics + charts -> docs/reports/version_1/
-python src/evaluate.py --version 2   # metrics + charts -> docs/reports/version_2/
+python src/pipeline/evaluate.py --version 1   # metrics + charts -> docs/reports/version_1/
+python src/pipeline/evaluate.py --version 2   # metrics + charts -> docs/reports/version_2/
 ```
 
 Once you've decided, activate the version you want:
 
 ```
-python src/set_active_model.py --version N
+python src/serving/set_active_model.py --version N
 ```
 
 This updates `models/active/` (and `models/active/ACTIVE_MODEL.json`, which records which version and run is live). Nothing else does this automatically — running this command is the only way the served model changes. **On its own, this doesn't restart or update an API that's already running** — see step 7's `--reload-api` flag for a way to do both in one command.
@@ -68,13 +68,13 @@ This updates `models/active/` (and `models/active/ACTIVE_MODEL.json`, which reco
 ## 6. Batch predictions
 
 ```
-python src/predict.py --input <path-to-csv-or-parquet> --output predictions.csv
+python src/serving/predict.py --input <path-to-csv-or-parquet> --output predictions.csv
 ```
 
 The model expects a `review_text` field (title and body combined). If your input file already has one — like `data/processed/*.parquet` does — it's used as-is; otherwise, pass `--text-col`/`--title-col` to point at your own columns, and they'll be combined the same way training combined them:
 
 ```
-python src/predict.py --input reviews.csv --text-col body --title-col headline --output out.csv
+python src/serving/predict.py --input reviews.csv --text-col body --title-col headline --output out.csv
 ```
 
 ## 7. Real-time API
@@ -106,7 +106,7 @@ curl -X POST http://localhost:8000/predict \
 **Switching the model version on a running API**: as noted in step 5, `set_active_model.py` on its own doesn't restart or update an API that's already running. To do both in one command:
 
 ```
-python src/set_active_model.py --version N --reload-api
+python src/serving/set_active_model.py --version N --reload-api
 ```
 
 This activates version `N` and then calls the API's `POST /admin/reload-model` endpoint (using the same key) so it starts serving that version right away — no restart needed. If the API isn't running, activation still succeeds, and the command just prints a note to start or restart it yourself.
@@ -118,8 +118,8 @@ A Postman collection ("Amazon Reviews Sentiment Predictor API") documents and ex
 `GET /metrics` (no key needed) exposes Prometheus-format request counters and response-time histograms, plus `active_model_version` and `prediction_drift_psi` gauges. `GET /admin/drift-report` (needs the key) returns the latest result from a background check that compares recent `/predict` traffic against a baseline captured during evaluation:
 
 ```
-python src/evaluate.py --version N        # also writes docs/reports/version_N/baseline_stats.json
-python src/set_active_model.py --version N  # copies it to models/active/BASELINE_STATS.json
+python src/pipeline/evaluate.py --version N        # also writes docs/reports/version_N/baseline_stats.json
+python src/serving/set_active_model.py --version N  # copies it to models/active/BASELINE_STATS.json
 ```
 
 For a live view of the logs, or a dashboard with charts, see the "Browsing the logs" section in [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) (full design, log format, and drift thresholds are there too).

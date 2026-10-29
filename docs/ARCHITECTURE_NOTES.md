@@ -20,11 +20,11 @@ Ports forwarded: **4040** (Spark's UI, while a job is running), **8000** (the AP
 
 ```
 Kaggle (kritanjalijain/amazon-reviews)
-        |  src/data_download.py  (needs a Kaggle API token;
+        |  src/pipeline/data_download.py  (needs a Kaggle API token;
         |                         skips automatically if data is already downloaded)
         v
    data/raw/*.csv                     (not committed to the repo)
-        |  src/preprocess.py  (Spark: cleans text, fixes types, combines
+        |  src/pipeline/preprocess.py  (Spark: cleans text, fixes types, combines
         |                      title + body into review_text; skips
         |                      automatically if already processed)
         v
@@ -33,20 +33,20 @@ Kaggle (kritanjalijain/amazon-reviews)
         +--> src/notebooks/01_eda.ipynb              (exploration + charts, run by hand)
         +--> src/notebooks/02_pipeline_walkthrough.ipynb  (a stage-by-stage walkthrough, run by hand)
         |
-        |  src/train.py
+        |  src/pipeline/train.py
         |    - 80/20 train/validation split
         |    - Optuna hyperparameter search over the pipeline
         |    - logs every run to MLflow, registers a new model version
         v
    MLflow registry ("amazon_review_sentiment_predictor", versioned)
-        |  src/set_active_model.py --version N   (explicit, on demand only)
+        |  src/serving/set_active_model.py --version N   (explicit, on demand only)
         v
    models/active/  (+ ACTIVE_MODEL.json)          (not committed)
         |
-        +--> src/predict.py        (batch scoring from the command line)
-        +--> src/api/app.py        (the FastAPI /predict, /health endpoints)
+        +--> src/serving/predict.py  (batch scoring from the command line)
+        +--> src/api/app.py          (the FastAPI /predict, /health endpoints)
         |
-        |  src/evaluate.py [--version N]  (scores data/processed/test.parquet
+        |  src/pipeline/evaluate.py [--version N]  (scores data/processed/test.parquet
         |                                  against models/active/, or any
         |                                  specific registered version directly --
         |                                  useful for comparing candidates
@@ -63,7 +63,7 @@ Activating a version doesn't, by itself, affect an API that's already running �
 
 ## Three ways to use the model
 
-1. **Batch** (`src/predict.py`) — a command-line tool that scores a whole file of reviews in one pass. The natural choice for "predict sentiment across a dataset."
+1. **Batch** (`src/serving/predict.py`) — a command-line tool that scores a whole file of reviews in one pass. The natural choice for "predict sentiment across a dataset."
 2. **Notebooks** — interactive exploration, run by hand, not part of any automated pipeline.
 3. **Real-time API** (`src/api/app.py`) — a FastAPI service that keeps one Spark session and one loaded model ready, answering requests one (or a few) at a time over HTTP.
 
@@ -81,7 +81,7 @@ The API has three observability pieces on top of everything above — the full d
 
 - **Logging**: every request is logged as one JSON line via Python's standard `logging` module (`src/api/logging_config.py`), including failed requests (400/401/500), which used to go unrecorded. Health checks and metrics scrapes are logged separately from real traffic so they don't crowd it out.
 - **Metrics**: `GET /metrics` (Prometheus's plain-text format, via `prometheus-fastapi-instrumentator`) exposes request counts and response-time histograms, plus two custom numbers: `active_model_version` and `prediction_drift_psi`.
-- **Model drift**: `src/evaluate.py` captures a baseline — prediction confidence and review length — from the held-out test set; `set_active_model.py` copies it into `models/active/BASELINE_STATS.json` when a version is activated; a background check in the API (`src/api/drift.py`) compares recent live traffic against that baseline every few minutes, using a statistic called the Population Stability Index, and surfaces the result through the metrics above and `GET /admin/drift-report`. This catches *shifts* in the kind of input and output the model is seeing, not whether individual predictions are *correct* — there's no way to check that without labeled real-world data.
+- **Model drift**: `src/pipeline/evaluate.py` captures a baseline — prediction confidence and review length — from the held-out test set; `set_active_model.py` copies it into `models/active/BASELINE_STATS.json` when a version is activated; a background check in the API (`src/api/drift.py`) compares recent live traffic against that baseline every few minutes, using a statistic called the Population Stability Index, and surfaces the result through the metrics above and `GET /admin/drift-report`. This catches *shifts* in the kind of input and output the model is seeing, not whether individual predictions are *correct* — there's no way to check that without labeled real-world data.
 
 ## Experiment tracking and the model registry (MLflow)
 
