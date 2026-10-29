@@ -1,6 +1,6 @@
 # Deployment (operational guide)
 
-This describes what's **actually running** and how to work with it. For the reasoning behind each decision made along the way (why AWS over Modal, why each phase is scoped the way it is), see [`docs/CLOUD_DEPLOYMENT_PLAN.md`](CLOUD_DEPLOYMENT_PLAN.md) -- that's the historical planning doc; this one is the current, operational one.
+This describes what's **actually running** and how to work with it. For the reasoning behind each decision made along the way (why AWS over Modal, why each phase is scoped the way it is), see [`docs/CLOUD_DEPLOYMENT_PLAN.md`](CLOUD_DEPLOYMENT_PLAN.md) -- that's the historical planning doc; this one is the current, operational one. See [`docs/diagrams/aws-architecture.html`](diagrams/aws-architecture.html) for an interactive diagram of everything described below.
 
 ## The shape of it, in one paragraph
 

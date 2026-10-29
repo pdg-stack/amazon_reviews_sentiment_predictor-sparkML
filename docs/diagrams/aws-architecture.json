@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "AWS Cloud Deployment",
+    "output": "aws-architecture.html",
+    "quality_profile": "showcase",
+    "viewBox": [1360, 660]
+  },
+  "components": [
+    { "id": "clients", "type": "external", "label": "Clients", "sublabel": "curl / Postman", "pos": [40, 420], "size": [110, 60] },
+    { "id": "modal", "type": "external", "label": "Modal", "sublabel": "load generator", "pos": [40, 540], "size": [110, 60] },
+    { "id": "waf", "type": "security", "label": "WAF", "sublabel": "rate-based rule", "pos": [210, 420], "size": [110, 60] },
+    { "id": "cloudfront", "type": "cloud", "label": "CloudFront", "sublabel": "one distribution", "pos": [380, 420], "size": [120, 60] },
+    { "id": "eventbridge", "type": "cloud", "label": "EventBridge", "sublabel": "rule, every 2 min", "pos": [380, 100], "size": [130, 60] },
+    { "id": "nginx", "type": "backend", "label": "nginx", "sublabel": "reverse proxy", "pos": [560, 420], "size": [110, 60] },
+    { "id": "api", "type": "backend", "label": "api", "sublabel": ":8000", "pos": [740, 220], "size": [110, 60] },
+    { "id": "mlflow_ui", "type": "backend", "label": "mlflow-ui", "sublabel": ":5000", "pos": [740, 340], "size": [120, 60] },
+    { "id": "grafana", "type": "backend", "label": "grafana", "sublabel": "Predictions + Drift", "pos": [740, 460], "size": [130, 60] },
+    { "id": "log_viewer", "type": "backend", "label": "log-viewer", "sublabel": "GoAccess", "pos": [740, 580], "size": [120, 60] },
+    { "id": "rds", "type": "database", "label": "RDS Postgres", "sublabel": "mlflow + app schemas", "pos": [990, 300], "size": [140, 80] },
+    { "id": "emr", "type": "cloud", "label": "EMR Serverless", "sublabel": "training, on demand", "pos": [990, 100], "size": [150, 60] },
+    { "id": "s3", "type": "cloud", "label": "S3", "sublabel": "data + artifacts + logs", "pos": [1190, 100], "size": [150, 60] }
+  ],
+  "boundaries": [
+    { "kind": "security-group", "label": "EC2 instance", "wraps": ["nginx", "api", "mlflow_ui", "grafana", "log_viewer"], "pad": 18 }
+  ],
+  "connections": [
+    { "from": "clients", "to": "waf", "label": "HTTPS" },
+    { "from": "modal", "to": "waf", "label": "POST /predict" },
+    { "from": "waf", "to": "cloudfront", "variant": "security" },
+    { "from": "cloudfront", "to": "nginx", "label": "origin (HTTP)", "labelDy": -24 },
+    { "from": "eventbridge", "to": "api", "label": "GET /admin/drift-report", "variant": "dashed", "toSide": "top" },
+    { "from": "nginx", "to": "api", "label": "/predict, /health", "labelAt": [610, 250] },
+    { "from": "nginx", "to": "mlflow_ui", "label": "/mlflow/", "labelAt": [650, 370] },
+    { "from": "nginx", "to": "grafana", "label": "/grafana/", "labelAt": [630, 490] },
+    { "from": "nginx", "to": "log_viewer", "label": "/logs/", "labelAt": [705, 570] },
+    { "from": "api", "to": "rds", "label": "app schema" },
+    { "from": "mlflow_ui", "to": "rds", "label": "mlflow schema" },
+    { "from": "grafana", "to": "rds", "label": "reads app schema" },
+    { "from": "emr", "to": "s3", "label": "data + artifacts", "labelDy": -24 }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Edge", "items": ["WAF blocks over the per-IP rate limit before CloudFront", "CloudFront is the only public entry point -- nginx has no direct internet exposure", "No SSH anywhere: SSM Run Command / Session Manager only"] },
+    { "dot": "rose", "title": "Training (Phase 1)", "items": ["EMR Serverless provisions workers per job, releases them when done -- no idle cluster cost", "preprocess.py/train.py/evaluate.py run close to unchanged, same Spark code as local dev", "A recovery entrypoint (emr_evaluate_job.py) re-runs just evaluation if only the report step fails", "MLFLOW_TRACKING_URI points training/evaluation at the same RDS instance api/mlflow-ui use"] },
+    { "dot": "emerald", "title": "Automation (Phase 3 + 4)", "items": ["EventBridge replaces an internal drift-check loop -- decoupled from the API process's own uptime", "A systemd timer (not shown) syncs logs/ to S3 every 5 minutes -- AL2023 ships no cron by default", "Push to main -> GitHub Actions builds + pushes to ECR + redeploys via SSM, via OIDC (no stored AWS keys)"] }
+  ]
+}

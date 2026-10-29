@@ -93,7 +93,7 @@ A Postman collection ("Amazon Reviews Sentiment Predictor API") documents and ex
 
 ## Cloud deployment
 
-This is built and deployed, not just planned — see [`DEPLOYMENT.md`](DEPLOYMENT.md) for how to reach it and operate it, and [`CLOUD_DEPLOYMENT_PLAN.md`](CLOUD_DEPLOYMENT_PLAN.md) for the reasoning behind each choice. In short:
+This is built and deployed, not just planned — see [`DEPLOYMENT.md`](DEPLOYMENT.md) for how to reach it and operate it (or [`diagrams/aws-architecture.html`](diagrams/aws-architecture.html) for an interactive diagram of it), and [`CLOUD_DEPLOYMENT_PLAN.md`](CLOUD_DEPLOYMENT_PLAN.md) for the reasoning behind each choice. In short:
 
 - **Batch**: the same Spark job — `preprocess.py` → `train.py` → `evaluate.py` — runs unchanged on AWS EMR Serverless, a managed Spark platform, since the trained pipeline's saved format is portable. No cluster sits running between jobs; it provisions per job and releases automatically.
 - **Real-time**: the same FastAPI container (plus `mlflow-ui`, `log-viewer`, `grafana`) runs on a single EC2 instance behind CloudFront + WAF. A real load test against the live deployment confirmed the limitation already noted above: the current one-embedded-Spark-session design handles normal traffic fine, but its *latency* degrades well before anywhere near production scale. The fix remains the same one described there — export the model's coefficients/vocabulary and serve with a lighter, non-Java scorer — just now backed by a real measurement instead of a guess.
