@@ -66,6 +66,17 @@ services:
     image: grafana/grafana:11.2.0
     container_name: grafana
     restart: unless-stopped
+    # %(domain)s/%(protocol)s in GF_SERVER_ROOT_URL are filled from Grafana's
+    # OWN server.domain/server.protocol config, not inferred from the
+    # incoming request -- those default to localhost/http, so Grafana was
+    # redirecting every request to http://localhost/grafana/, unreachable
+    # from outside the instance. Overriding the entrypoint to export
+    # GF_SERVER_DOMAIN/GF_SERVER_PROTOCOL from CLOUDFRONT_DOMAIN (env_file
+    # below) before handing off to the image's real entrypoint (/run.sh)
+    # fixes this without fighting Grafana's own env-var-driven config system.
+    entrypoint: ["sh", "-c"]
+    command:
+      - export GF_SERVER_DOMAIN=$$CLOUDFRONT_DOMAIN GF_SERVER_PROTOCOL=https && exec /run.sh
     environment:
       GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
@@ -74,7 +85,7 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
     env_file:
-      - .env.aws  # APP_DB_* -- read by grafana/provisioning/datasources/app_db.yml
+      - .env.aws  # APP_DB_*, CLOUDFRONT_DOMAIN
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning
       - grafana-data:/var/lib/grafana
