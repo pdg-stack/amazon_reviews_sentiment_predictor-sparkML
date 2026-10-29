@@ -100,7 +100,13 @@ async def generate_load():
     stats = {"requests_sent": 0, "requests_ok": 0, "requests_failed": 0, "sessions_started": 0}
 
     limits = httpx.Limits(max_connections=1500, max_keepalive_connections=400)
-    async with httpx.AsyncClient(timeout=30.0, limits=limits) as client:
+    # 30s was too tight: the first real run showed the server completing far
+    # more requests than this client counted as "ok" -- most of the gap was
+    # requests that were still genuinely in-flight (not errored) when this
+    # timeout gave up on them, confirmed by counting actual rows written to
+    # app.predictions afterward. 120s gives slow-but-real responses enough
+    # room to land as a true success/failure instead of a false timeout.
+    async with httpx.AsyncClient(timeout=120.0, limits=limits) as client:
 
         async def send_batch(api_key: str, n: int) -> None:
             picks = random.sample(pool, n)
