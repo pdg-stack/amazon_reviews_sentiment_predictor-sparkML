@@ -4,17 +4,19 @@
 # local[*] Spark session, same as .devcontainer/local dev, since inference
 # is small-batch and doesn't need a cluster.
 #
-# Deploy (see docs/DEPLOYMENT.md for the full sequence): sync the repo to
-# this instance, then `docker compose -f docker-compose.cloud.yml up -d --build`.
+# Phase 4: api/log-viewer are pre-built images from ECR (GitHub Actions
+# builds + pushes on merge to main, see .github/workflows/deploy.yml and
+# infra/cicd.tf) -- this instance only ever `docker compose pull`s them,
+# never builds locally. `aws ecr get-login-password | docker login` first
+# (the deploy workflow's own SSM command does this); the instance's IAM
+# role already has the needed ecr:* pull permissions (ec2.tf).
+#
 # Env comes from .env + .env.aws (same files/convention as local dev's
 # optional .env.aws -- see docker-compose.yml's own comment on that).
 
 services:
   api:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    image: amazon-reviews-sentiment:latest
+    image: 183088117536.dkr.ecr.us-east-1.amazonaws.com/arsp-api:latest
     container_name: api
     working_dir: /workspace
     command: uvicorn src.api.app:app --host 0.0.0.0 --port 8000
@@ -29,7 +31,7 @@ services:
       - .:/workspace
 
   mlflow-ui:
-    image: amazon-reviews-sentiment:latest
+    image: 183088117536.dkr.ecr.us-east-1.amazonaws.com/arsp-api:latest
     container_name: mlflow-ui
     working_dir: /workspace
     # --static-prefix: see docker/nginx.conf's /mlflow/ location comment.
@@ -49,9 +51,7 @@ services:
     restart: unless-stopped
 
   log-viewer:
-    build:
-      context: .
-      dockerfile: docker/log-viewer.Dockerfile
+    image: 183088117536.dkr.ecr.us-east-1.amazonaws.com/arsp-log-viewer:latest
     container_name: log-viewer
     working_dir: /workspace
     # Continuation lines MUST stay at this same indentation, not deeper (not

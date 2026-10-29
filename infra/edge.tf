@@ -20,7 +20,15 @@ resource "aws_wafv2_web_acl" "main" {
     }
     statement {
       rate_based_statement {
-        limit              = 2000 # requests per 5-minute window per IP
+        # Raised from 2000 for the Phase 2 Modal load test: ~1000 concurrent
+        # sessions at peak, each sending ~1 request/minute after their
+        # initial burst, works out to ~1000-1250 req/min sustained -- up to
+        # ~6000 in a rolling 5-min window -- and Modal's calls come from a
+        # small/shared set of egress IPs, not 1000 distinct ones, so this
+        # whole load concentrates onto very few source IPs (flagged as a
+        # risk in docs/CLOUD_DEPLOYMENT_PLAN.md's original Phase 2 design).
+        # Lower this back down once the load test is done.
+        limit              = 20000 # requests per 5-minute window per IP
         aggregate_key_type = "IP"
       }
     }

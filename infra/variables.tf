@@ -48,3 +48,9 @@ variable "ec2_instance_type" {
   type        = string
   default     = "c5.xlarge"
 }
+
+variable "github_repo" {
+  description = "owner/repo whose main branch is trusted to assume the GitHub Actions deploy role (cicd.tf)."
+  type        = string
+  default     = "pdg-stack/amazon_reviews_sentiment_predictor-sparkML"
+}
