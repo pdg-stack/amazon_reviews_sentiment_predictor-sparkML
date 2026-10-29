@@ -70,15 +70,18 @@ services:
     # OWN server.domain/server.protocol config, not inferred from the
     # incoming request -- those default to localhost/http, so Grafana was
     # redirecting every request to http://localhost/grafana/, unreachable
-    # from outside the instance. Overriding the entrypoint to export
-    # GF_SERVER_DOMAIN/GF_SERVER_PROTOCOL from CLOUDFRONT_DOMAIN (env_file
-    # below) before handing off to the image's real entrypoint (/run.sh)
-    # fixes this without fighting Grafana's own env-var-driven config system.
+    # from outside the instance. GF_SERVER_PROTOCOL also controls what
+    # protocol Grafana's OWN listener speaks, not just the redirect URL's
+    # text -- setting it to https switched the listener into TLS-only mode,
+    # which nginx (plain HTTP to this internal hop; CloudFront already
+    # terminates TLS at the edge) can't talk to, hence a 400 from nginx.
+    # Building the full root_url as a plain literal (no %(...)s template,
+    # no touching GF_SERVER_PROTOCOL) sidesteps both problems: Grafana's
+    # listener stays on its default http, external links are still https.
     entrypoint: ["sh", "-c"]
     command:
-      - export GF_SERVER_DOMAIN=$$CLOUDFRONT_DOMAIN GF_SERVER_PROTOCOL=https && exec /run.sh
+      - export GF_SERVER_ROOT_URL="https://$$CLOUDFRONT_DOMAIN/grafana/" && exec /run.sh
     environment:
-      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
       # RDS `app` schema is the one and only datasource (provisioned below) --
       # no separate login flow needed for a single-operator dashboard.
