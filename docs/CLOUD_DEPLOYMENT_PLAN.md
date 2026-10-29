@@ -1,6 +1,6 @@
 # Cloud deployment: AWS (training via EMR Serverless, stack on EC2)
 
-> Working plan document, not the finished deployment doc. `docs/DEPLOYMENT.md` gets rewritten from this once the plan is fully implemented and verified.
+> This was the working plan while building Phases 1-4 -- kept as-is for the reasoning behind each decision (why AWS over Modal, why each phase is scoped the way it is). It's now historical: for the current, operational view of what's actually running and how to work with it, see [`docs/DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ## Context
 
@@ -159,9 +159,15 @@ flowchart TB
 
 `set_active_model.py --version N` (not shown as its own box): runs as a one-off container on the EC2 instance after each training run, pulling the winning model from RDS+S3 into local `models/active/`, which `api` reads from.
 
-## Status as of 2026-10-28
+## Status as of 2026-10-29: all four phases built and deployed
 
-- **Phase 1**: infra code written (S3/RDS/EMR Serverless/ECR via OpenTofu); actual EMR Serverless run never executed -- validated locally instead. Local active model: version 3 (0.876 acc / 0.943 AUC).
-- **Phase 2 & 3**: EC2/RDS/CloudFront/WAF were provisioned, API/nginx/compose/Grafana code written, then **all AWS infrastructure was torn down** (verified independently) to stop incurring cost. Code exists in the repo; nothing is currently deployed.
-- **Phase 4**: not started.
-- `.env.aws` contains stale connection strings from the destroyed RDS instance -- needs regenerating before any future apply.
+Everything below is live, not just written -- see `docs/DEPLOYMENT.md` for the operational guide (how to reach the dashboards, redeploy, tear down) now that this plan has actually been carried out.
+
+- **Phase 1**: real EMR Serverless run against cloud RDS/S3 (not a local simulation) -- trained + registered model version 1, AUC 0.943 / accuracy 87.6% / F1 0.876. `docker/emr_evaluate_job.py` added as a lighter recovery entrypoint for re-running just the evaluation step without repaying for the full Optuna search.
+- **Phase 2**: the full serving stack (api, mlflow-ui, log-viewer, grafana, nginx) is running on the EC2 instance behind CloudFront + WAF, reachable at the CloudFront domain (run `tofu output cloudfront_domain` in `infra/` -- it changes if the distribution is ever recreated, which has happened twice during this build). `app.predictions`/`app.drift_checks` tables exist on the same RDS instance as MLflow's backend store, in a separate `app` database/user. A real 20-minute bell-curve Modal load test (`src/scripts/modal_load_test.py`) was run against the live stack, peaking at 1000 concurrent simulated sessions -- see its own section below for what that revealed about the current architecture's limits.
+- **Phase 3**: drift checks are no longer manually triggered -- a scheduled EventBridge rule (`infra/scheduler.tf`) calls `GET /admin/drift-report` every 2 minutes. A systemd timer (`infra/log-sync.service`/`.timer`) syncs `logs/` to S3 every 5 minutes (AL2023 ships no cron by default, confirmed by testing).
+- **Phase 4**: GitHub Actions deploys on every push to `main` via OIDC federation (`infra/cicd.tf`, no long-lived AWS keys) -- builds `docker/Dockerfile`/`docker/log-viewer.Dockerfile`, pushes to dedicated ECR repos (`infra/ecr.tf`), deploys via SSM Run Command. `docker-compose.cloud.yml` pulls these pre-built images rather than building on the instance.
+
+### What the load test actually found
+
+Running the real thing surfaced a genuine finding, not a bug: **50,937 predictions landed in `app.predictions` during the 20-minute run**, confirming real sustained throughput -- but the client-side success counter (887 of 8,728 requests) undercounted badly, because most responses took longer than the client's 30-second timeout once concurrency climbed past a few hundred. The server kept working; it just got slow under load. This is the single embedded Spark session doing exactly what `docs/ARCHITECTURE_NOTES.md` already warned it would: fine for the traffic this project has actually seen, not built for ~1000-concurrent-peak throughput. The fix described there (export the model's weights, score without a persistent Spark session) remains the right next step if this ever needs to handle that scale for real -- not built here.

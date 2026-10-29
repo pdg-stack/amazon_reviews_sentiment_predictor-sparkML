@@ -2,9 +2,11 @@
 
 A containerized PySpark project that explores the [Amazon Reviews](https://www.kaggle.com/datasets/kritanjalijain/amazon-reviews) dataset, tunes and trains a sentiment-classification model (using Spark's machine-learning library, with hyperparameter search via Optuna tracked in MLflow), evaluates it with charts, and serves it both as a batch job and a secured real-time API.
 
-See [`docs/ARCHITECTURE_NOTES.md`](docs/ARCHITECTURE_NOTES.md) for how the pieces fit together (or [`docs/diagrams/architecture-diagram.html`](docs/diagrams/architecture-diagram.html) for an interactive diagram of the same thing), [`docs/model_plan.md`](docs/model_plan.md) for why the modeling pipeline is built the way it is, [`docs/MODEL_HISTORY.md`](docs/MODEL_HISTORY.md) for how the model has changed across versions, [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) for the API's logging, metrics, and drift-monitoring design, and [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the (not yet built) cloud deployment plan.
+See [`docs/ARCHITECTURE_NOTES.md`](docs/ARCHITECTURE_NOTES.md) for how the pieces fit together (or [`docs/diagrams/architecture-diagram.html`](docs/diagrams/architecture-diagram.html) for an interactive diagram of the same thing), [`docs/model_plan.md`](docs/model_plan.md) for why the modeling pipeline is built the way it is, [`docs/MODEL_HISTORY.md`](docs/MODEL_HISTORY.md) for how the model has changed across versions, [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) for the API's logging, metrics, and drift-monitoring design, and [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the cloud deployment this project actually runs on (training via AWS EMR Serverless, serving behind CloudFront/WAF) — everything below this point is about running the project **locally**.
 
 The steps below use VS Code's Dev Container feature — one container, everything run by hand. For an alternative that splits the API, the MLflow UI, a persistent Spark cluster, and batch jobs into separately-running services with `docker compose`, see [`docs/DOCKER_COMPOSE.md`](docs/DOCKER_COMPOSE.md) (or [`docs/diagrams/docker-compose-diagram.html`](docs/diagrams/docker-compose-diagram.html) for a diagram of that setup) instead — it's an addition, not a replacement for the steps below.
+
+New to this codebase? [`docs/CODE_MAP.md`](docs/CODE_MAP.md) is a quick-reference for which file depends on which, and where each command/entry point actually starts.
 
 **No data is ever committed to this repo** — you download your own copy locally (see below).
 
@@ -85,6 +87,8 @@ Generate your local API key once (this prints it and writes it to a local, uncom
 python src/scripts/generate_api_key.py
 ```
 
+(`--count N` generates a pool of N keys instead of one, written as `API_KEYS` — for simulating many distinct callers, e.g. a load test assigning one key per simulated session, rather than normal single-client use. The API accepts any key from either form.)
+
 Start the API:
 
 ```
@@ -115,7 +119,7 @@ A Postman collection ("Amazon Reviews Sentiment Predictor API") documents and ex
 
 ## 8. Observability
 
-`GET /metrics` (no key needed) exposes Prometheus-format request counters and response-time histograms, plus `active_model_version` and `prediction_drift_psi` gauges. `GET /admin/drift-report` (needs the key) returns the latest result from a background check that compares recent `/predict` traffic against a baseline captured during evaluation:
+`GET /metrics` (no key needed) exposes Prometheus-format request counters and response-time histograms, plus `active_model_version` and `prediction_drift_psi` gauges. `GET /admin/drift-report` (needs the key) computes a **fresh** check, on demand, right when you call it — comparing recent `/predict` traffic against a baseline captured during evaluation. (It's on-demand rather than an internal timer specifically so a check never silently stops just because the API process restarted — in the cloud deployment, an external scheduler calls it every 2 minutes instead; see `docs/OBSERVABILITY.md`.)
 
 ```
 python src/pipeline/evaluate.py --version N        # also writes docs/reports/version_N/baseline_stats.json

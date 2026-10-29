@@ -81,7 +81,7 @@ The API has three observability pieces on top of everything above — the full d
 
 - **Logging**: every request is logged as one JSON line via Python's standard `logging` module (`src/api/logging_config.py`), including failed requests (400/401/500), which used to go unrecorded. Health checks and metrics scrapes are logged separately from real traffic so they don't crowd it out.
 - **Metrics**: `GET /metrics` (Prometheus's plain-text format, via `prometheus-fastapi-instrumentator`) exposes request counts and response-time histograms, plus two custom numbers: `active_model_version` and `prediction_drift_psi`.
-- **Model drift**: `src/pipeline/evaluate.py` captures a baseline — prediction confidence and review length — from the held-out test set; `set_active_model.py` copies it into `models/active/BASELINE_STATS.json` when a version is activated; a background check in the API (`src/api/drift.py`) compares recent live traffic against that baseline every few minutes, using a statistic called the Population Stability Index, and surfaces the result through the metrics above and `GET /admin/drift-report`. This catches *shifts* in the kind of input and output the model is seeing, not whether individual predictions are *correct* — there's no way to check that without labeled real-world data.
+- **Model drift**: `src/pipeline/evaluate.py` captures a baseline — prediction confidence and review length — from the held-out test set; `set_active_model.py` copies it into `models/active/BASELINE_STATS.json` when a version is activated; `GET /admin/drift-report` (`src/api/drift.py`) computes a fresh check **on demand** against recent live traffic, using a statistic called the Population Stability Index, and surfaces the result through the metrics above. There's no internal timer calling this — in the cloud deployment, an external AWS EventBridge rule calls it every 2 minutes instead, which is deliberate: it keeps drift-checking decoupled from whether the API process itself has been running continuously (see `docs/OBSERVABILITY.md` for why). This catches *shifts* in the kind of input and output the model is seeing, not whether individual predictions are *correct* — there's no way to check that without labeled real-world data.
 
 ## Experiment tracking and the model registry (MLflow)
 
@@ -89,11 +89,11 @@ The API has three observability pieces on top of everything above — the full d
 
 ## API documentation and testing
 
-A Postman collection ("Amazon Reviews Sentiment Predictor API") documents and exercises `/health` and `/predict`, with separate "Local" and "Production" environments — the latter's URL gets filled in once a cloud deployment exists, so pointing the collection at a deployed instance is a one-click environment swap, not a collection edit.
+A Postman collection ("Amazon Reviews Sentiment Predictor API") documents and exercises `/health` and `/predict`, with separate "Local" and "Production" environments — pointing the collection at the deployed instance (see `DEPLOYMENT.md` for the current CloudFront URL) is a one-click environment swap, not a collection edit. The collection itself lives in Postman, not this repo, so its "Production" environment value needs filling in by hand whenever the deployment's URL changes.
 
-## Path to a cloud deployment (a plan, not built yet)
+## Cloud deployment
 
-- **Batch**: the same Spark job — `preprocess.py` → `train.py` → `evaluate.py` — can run unchanged on a managed Spark platform (Databricks, EMR, Dataproc), since the trained pipeline's saved format is portable.
-- **Real-time**: the current FastAPI container could run as-is on any container host, but for handling meaningfully more traffic, the recommended next step is exporting the model's coefficients and vocabulary and serving them with a lighter, non-Java scorer, while keeping the same `/predict` contract and API-key check described above.
+This is built and deployed, not just planned — see [`DEPLOYMENT.md`](DEPLOYMENT.md) for how to reach it and operate it, and [`CLOUD_DEPLOYMENT_PLAN.md`](CLOUD_DEPLOYMENT_PLAN.md) for the reasoning behind each choice. In short:
 
-See [`DEPLOYMENT.md`](DEPLOYMENT.md) for the full, step-by-step plan.
+- **Batch**: the same Spark job — `preprocess.py` → `train.py` → `evaluate.py` — runs unchanged on AWS EMR Serverless, a managed Spark platform, since the trained pipeline's saved format is portable. No cluster sits running between jobs; it provisions per job and releases automatically.
+- **Real-time**: the same FastAPI container (plus `mlflow-ui`, `log-viewer`, `grafana`) runs on a single EC2 instance behind CloudFront + WAF. A real load test against the live deployment confirmed the limitation already noted above: the current one-embedded-Spark-session design handles normal traffic fine, but its *latency* degrades well before anywhere near production scale. The fix remains the same one described there — export the model's coefficients/vocabulary and serve with a lighter, non-Java scorer — just now backed by a real measurement instead of a guess.

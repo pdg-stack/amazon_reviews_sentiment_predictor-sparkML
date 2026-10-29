@@ -2,6 +2,8 @@
 
 See [`diagrams/docker-compose-diagram.html`](diagrams/docker-compose-diagram.html) for an interactive diagram of this setup.
 
+> **Two different compose files, two different jobs.** Everything below describes `docker-compose.yml` — the **local** split-service setup, with a real Spark cluster you run on your own machine. The **cloud** deployment uses a separate file, `docker-compose.cloud.yml`, run on the EC2 instance described in `docs/DEPLOYMENT.md` — no `spark-master`/`spark-worker`/`pipeline` there (AWS EMR Serverless handles training instead, see `docs/CLOUD_DEPLOYMENT_PLAN.md`), and it adds `nginx` (path-routes one CloudFront domain to all the services below) and `grafana` (reads the cloud deployment's `app.predictions`/`app.drift_checks` tables — see `docs/OBSERVABILITY.md`). If you're working with the live cloud deployment, this doc's service descriptions still apply to `api`/`mlflow-ui`/`log-viewer`, but the "Running it" commands below are for local use only.
+
 `docker-compose.yml` (repo root) is an **alternative** way to run this project, alongside the `.devcontainer` workflow described in the main [`README.md`](../README.md) and [`ARCHITECTURE_NOTES.md`](ARCHITECTURE_NOTES.md) — not a replacement for it. The devcontainer keeps working exactly as before: one container, Spark running in its simple built-in ("embedded") mode, and you run whichever script you want by hand. Nothing here requires the devcontainer to be touched or even set up.
 
 What compose adds: genuinely separate services that each run independently, instead of one container doing everything — backed by a real, standalone Spark cluster instead of each process starting its own throwaway Spark session.

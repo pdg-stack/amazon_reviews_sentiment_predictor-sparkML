@@ -37,7 +37,18 @@ Three loggers exist in `src/api/logging_config.py`: `api.requests` (the first fi
 
 ### Browsing the logs
 
-For a quick live view, [Logdy](https://logdy.dev) (open source, self-hosted) can tail either file straight into a browser with no setup. For actual analysis — charts of request volume, status codes, and response times over time, not just a live feed — the `log-viewer` service in `docker-compose.yml` runs [GoAccess](https://goaccess.io) (also open source) against `logs/api_requests.log` and serves a dashboard at `http://localhost:8081`. See `docs/DOCKER_COMPOSE.md` for how to start it. GoAccess expects a well-known access-log format, so a small script (`src/scripts/tail_to_clf.py`) converts this project's JSON lines into that format on the fly — the log file itself doesn't need to change.
+For a quick live view, [Logdy](https://logdy.dev) (open source, self-hosted) can tail either file straight into a browser with no setup. For actual analysis — charts of request volume, status codes, and response times over time, not just a live feed — the `log-viewer` service (in both `docker-compose.yml` locally and `docker-compose.cloud.yml` in the cloud deployment) runs [GoAccess](https://goaccess.io) (also open source) against `logs/api_requests.log` and serves a dashboard, at `http://localhost:8081` locally or `/logs/` on the cloud deployment's CloudFront domain (see `docs/DEPLOYMENT.md`). GoAccess expects a well-known access-log format, so a small script (`src/scripts/tail_to_clf.py`) converts this project's JSON lines into that format on the fly — the log file itself doesn't need to change.
+
+**One cloud-specific wrinkle**: GoAccess's own embedded web server (the port it listens on, `7890`) serves a WebSocket for live updates, not general page requests — a plain page load against it gets flatly rejected. The real dashboard content is the single static HTML file GoAccess writes to disk (`logs/log-viewer-report.html`, self-contained, no external assets), which nginx serves directly in the cloud deployment instead of proxying to that port. This means the cloud `/logs/` dashboard is a snapshot you refresh to update, not a page that updates itself live the way the local one (reached directly, not through nginx) can — a deliberate trade-off, since this is the least critical of the three dashboards (Grafana's Predictions/Drift below are the real observability addition).
+
+### Predictions and drift dashboards (Grafana, cloud deployment only)
+
+Two more dashboards exist only in the cloud deployment (`/grafana/` on the CloudFront domain), reading directly from the `app` schema on RDS Postgres rather than from log files:
+
+- **Predictions**: sentiment split, confidence histogram, prediction volume over time — from the `app.predictions` table, written by every successful `/predict` call (one row per text scored; see `src/api/db.py`).
+- **Drift**: PSI per signal over time, plus status and sample size — from the `app.drift_checks` table, written by every `GET /admin/drift-report` call (see below for what triggers that).
+
+Why a database instead of files for these two: Grafana reads SQL, not JSON log lines, and a table of structured rows is also what makes the PSI trend over time queryable at all — the drift check below computes one PSI value per call, and something needs to persist that history for a trend line to exist.
 
 ## Metrics
 
@@ -57,15 +68,17 @@ There's no way to check whether live predictions are *correct* — nobody labels
 
 1. `evaluate.py` builds a baseline from the held-out test set: a distribution of (a) how confident the model was in its predicted class — the same number already logged as `results[].probability` above — and (b) how long each review's combined text was, in words. Both are written to `docs/reports/version_N/baseline_stats.json`.
 2. `set_active_model.py --version N` copies that file to `models/active/BASELINE_STATS.json` whenever it activates version N, so the baseline on disk always matches whichever model is actually serving requests. If a version was registered before this baseline-capture code existed, activation prints a warning and drift checks report `"unavailable"` until that version is re-evaluated.
-3. A background task inside the API (`src/api/drift.py`, started when the API starts) checks in regularly — every 15 minutes by default — looking at the last hour of successful `/predict` calls and comparing their confidence and length distributions against the baseline, using a statistic called the **Population Stability Index (PSI)**, which measures how much a distribution has shifted from a reference one. A higher PSI means a bigger shift.
+3. `GET /admin/drift-report` computes a check **on demand, right now** — it does NOT run on a timer inside the API process (there used to be an internal `asyncio` background loop; it was removed once this moved to the cloud, see below for why). Whoever/whatever calls this endpoint looks at the last `window_seconds` (120s / 2 minutes by default) of successful `/predict` calls and compares their confidence and length distributions against the baseline, using a statistic called the **Population Stability Index (PSI)**, which measures how much a distribution has shifted from a reference one. A higher PSI means a bigger shift. The result is both returned as the HTTP response AND saved as one row in `app.drift_checks` (Postgres, via `src/api/db.py`) — Grafana's Drift dashboard reads that table, it never calls this endpoint itself.
+
+**Who actually calls it on a schedule**: in the cloud deployment, an AWS EventBridge rule (`infra/scheduler.tf`) calls this endpoint every 2 minutes — an external trigger, not internal process state. This matters for *why* it's designed this way: a scheduled HTTP call is restartable, inspectable in CloudWatch, and doesn't tie drift-checking to the API process's own lifetime (a restart no longer means "drift checking stopped and nobody noticed"). Locally, with nothing hitting this endpoint on a schedule, drift just never gets checked automatically — call it yourself with `curl` when you want a fresh number, which is the right trade-off for a setup with no always-on scheduler.
 
 **Reading a report** (`GET /admin/drift-report`, needs the `X-API-Key` header):
 
 ```json
 {
   "status": "ok",
-  "sample_size": 142,
-  "window_seconds": 3600,
+  "sample_size": 42,
+  "window_seconds": 120,
   "checked_at": "...",
   "metrics": {"prediction_confidence_psi": 0.04, "review_length_psi": 0.11}
 }
@@ -73,7 +86,7 @@ There's no way to check whether live predictions are *correct* — nobody labels
 
 `status` follows the standard convention for reading a PSI score: under 0.1 is `"ok"`, 0.1 to 0.25 is `"warning"`, and 0.25 or above is `"alert"` — whichever of the two signals scores worse decides the overall status. Two other statuses can appear before any PSI is even computed: `"unavailable"` (no baseline exists yet for the active model — step 2 above hasn't run) and `"insufficient_data"` (fewer than 30 predictions in the time window — a PSI score computed on a handful of samples is mostly noise).
 
-**Worth knowing**: this is built for a low-traffic, single-developer setup. Checking every 15 minutes over a 1-hour window, and needing at least 30 samples to say anything, means real usage will often land on `"insufficient_data"` rather than a real verdict — that's expected, not a bug. Treat any `"warning"` or `"alert"` you do see as illustrative rather than statistically rigorous, and don't read too much into an `"ok"` result from a tiny sample either.
+**Worth knowing**: a 2-minute window needs real sustained traffic — roughly 15+ predictions per minute — to clear that 30-sample minimum at all; below that, most checks will report `"insufficient_data"` rather than a real verdict. That's expected, not a bug, and was confirmed directly: a live 20-minute load test against the deployed stack produced real `"alert"` results (PSI ~4.1 on prediction confidence) once traffic was flowing, and `"insufficient_data"` again as soon as it stopped. Treat any `"warning"` or `"alert"` you do see as illustrative rather than statistically rigorous, and don't read too much into an `"ok"` result from a tiny sample either.
 
 "Alerting" here just means a log line at `WARNING` level (via the `api.app` logger) plus the non-`"ok"` status above — there's no email or chat notification built in. The Prometheus gauge could be connected to an alerting tool later if this ever needs to notify someone directly, but that isn't built now.
 
@@ -81,4 +94,4 @@ There's no way to check whether live predictions are *correct* — nobody labels
 
 - **It doesn't track accuracy.** Nothing here can tell you whether predictions are *correct* — that needs labeled ground truth on live traffic, a separate and much heavier process this project doesn't build.
 - **It doesn't cover batch scoring.** `predict.py`, the command-line batch tool, doesn't write to either log file and isn't part of the drift check — this is entirely about the live `/predict` endpoint.
-- **There's no dashboard beyond what's described above.** No permanent metrics-storage server is run by this project (see the scope note in `ARCHITECTURE_NOTES.md`); `/metrics` is ready to be scraped by one if you add it yourself.
+- **`/metrics` itself still has no permanent *metrics* store behind it.** Grafana (cloud deployment) reads `app.predictions`/`app.drift_checks` directly — that's a database of application-level records, not a Prometheus-style time-series store. Nothing currently scrapes `/metrics` into Prometheus/CloudWatch/etc.; it's exposed and ready to be scraped by one if you add it yourself, but isn't today.
