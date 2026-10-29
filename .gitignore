@@ -2,21 +2,23 @@
 data/
 
 # Trained models, tracking, logs -- runtime-generated, not portable/reproducible
+# (models/ also covers models/mlruns/, MLflow's tracking DB and artifacts)
 models/
-mlruns/
+# defensive catch-all in case a stray db ever appears outside models/mlruns/
 mlflow.db*
 logs/
 /_*.log
 
-# reports/ IS committed (see docs/MODEL_HISTORY.md, which embeds its charts)
+# docs/reports/ IS committed (see docs/MODEL_HISTORY.md, which embeds its charts)
 
 # Secrets (keep the folder + its placeholder note, ignore only the real token)
 .kaggle/*
 !.kaggle/.gitkeep
 .env
+.env.aws
 
 # Notebooks / Python
-notebooks/.ipynb_checkpoints/
+src/notebooks/.ipynb_checkpoints/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
@@ -25,5 +27,17 @@ __pycache__/
 spark-warehouse/
 derby.log
 
+# Pytest cache (also self-excludes via its own nested .pytest_cache/.gitignore,
+# but listed here explicitly so it's visible without opening that folder)
+.pytest_cache/
+
 # Claude Code agent worktree storage (tooling metadata, not project content)
 .claude/
+
+# OpenTofu/Terraform state (contains the RDS password) and local working dirs
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.*
+infra/*.tfplan
+infra/tfplan*
+infra/crash.log

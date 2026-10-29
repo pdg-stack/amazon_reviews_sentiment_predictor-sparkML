@@ -1,16 +1,18 @@
 """
 Unit tests for src/api/drift.py. Deliberately Spark-free (no SparkSession,
 no PySpark import anywhere in this file) -- drift.py is pure Python/numpy by
-design specifically so it can be tested this cheaply. See docs/OBSERVABILITY.md.
+design specifically so it can be tested this cheaply, with src.api.db's
+Postgres query mocked/stubbed rather than hitting a real database. See
+docs/OBSERVABILITY.md.
 """
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import numpy as np
 import pytest
 
-from src.api import drift
+from src.api import db, drift
 
 
 # --- compute_psi ---------------------------------------------------------
@@ -84,34 +86,23 @@ def test_load_baseline_reads_json(tmp_path, monkeypatch):
 
 
 # --- _tail_recent_predictions ---------------------------------------------------------
+# Window/event filtering now happens in the SQL query itself (src/api/db.py,
+# against a real Postgres database) -- these tests just confirm drift.py
+# delegates to it correctly, with db.query_recent_predictions mocked.
 
 
-def _log_line(event: str, timestamp: datetime, **extra) -> str:
-    entry = {"timestamp": timestamp.strftime("%Y-%m-%dT%H:%M:%S"), "event": event, **extra}
-    return json.dumps(entry)
+def test_tail_recent_predictions_delegates_to_db_with_window(monkeypatch):
+    calls = []
+    monkeypatch.setattr(db, "query_recent_predictions", lambda window_seconds: calls.append(window_seconds) or [{"probability": 0.9, "review_length": 42}])
+
+    kept = drift._tail_recent_predictions(window_seconds=1234)
+    assert calls == [1234]
+    assert kept == [{"probability": 0.9, "review_length": 42}]
 
 
-def test_tail_recent_predictions_filters_event_window_and_bad_lines(tmp_path, monkeypatch):
-    log_path = tmp_path / "api_requests.log"
-    now = datetime.now()
-    lines = [
-        _log_line("predict", now - timedelta(minutes=5), results=[{"probability": 0.9}]),  # in window, predict -> kept
-        _log_line("access", now - timedelta(minutes=5), status=200),  # in window, but not "predict" -> dropped
-        _log_line("predict", now - timedelta(hours=2), results=[{"probability": 0.5}]),  # predict, but outside window -> dropped
-        "not valid json at all",  # malformed -> skipped, must not raise
-        "",  # blank line -> skipped
-    ]
-    log_path.write_text("\n".join(lines) + "\n")
-    monkeypatch.setattr(drift, "REQUEST_LOG_PATH", log_path)
-
-    kept = drift._tail_recent_predictions(window_seconds=3600)
-    assert len(kept) == 1
-    assert kept[0]["results"][0]["probability"] == 0.9
-
-
-def test_tail_recent_predictions_missing_file_returns_empty(tmp_path, monkeypatch):
-    monkeypatch.setattr(drift, "REQUEST_LOG_PATH", tmp_path / "nope.log")
-    assert drift._tail_recent_predictions(window_seconds=3600) == []
+def test_tail_recent_predictions_passes_through_empty_result(monkeypatch):
+    monkeypatch.setattr(db, "query_recent_predictions", lambda window_seconds: [])
+    assert drift._tail_recent_predictions(window_seconds=900) == []
 
 
 # --- run_drift_check ---------------------------------------------------------
@@ -134,7 +125,7 @@ def test_run_drift_check_insufficient_data_below_min_sample(tmp_path, monkeypatc
         )
     )
     monkeypatch.setattr(drift, "ACTIVE_BASELINE_PATH", baseline_path)
-    monkeypatch.setattr(drift, "REQUEST_LOG_PATH", tmp_path / "empty.log")  # no entries at all
+    monkeypatch.setattr(db, "query_recent_predictions", lambda window_seconds: [])  # no rows at all
 
     report = drift.run_drift_check()
     assert report["status"] == "insufficient_data"
@@ -155,21 +146,15 @@ def test_run_drift_check_ok_when_enough_matching_samples(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(drift, "ACTIVE_BASELINE_PATH", baseline_path)
 
-    log_path = tmp_path / "api_requests.log"
-    now = datetime.now()
     rng = np.random.default_rng(0)
-    lines = []
-    for p, length in zip(rng.uniform(0.5, 1.0, size=drift.MIN_SAMPLE_SIZE + 5), rng.integers(1, 100, size=drift.MIN_SAMPLE_SIZE + 5)):
-        lines.append(
-            _log_line(
-                "predict",
-                now,
-                results=[{"probability": float(p)}],
-                review_text_lengths=[int(length)],
-            )
+    rows = [
+        {"probability": float(p), "review_length": int(length)}
+        for p, length in zip(
+            rng.uniform(0.5, 1.0, size=drift.MIN_SAMPLE_SIZE + 5),
+            rng.integers(1, 100, size=drift.MIN_SAMPLE_SIZE + 5),
         )
-    log_path.write_text("\n".join(lines) + "\n")
-    monkeypatch.setattr(drift, "REQUEST_LOG_PATH", log_path)
+    ]
+    monkeypatch.setattr(db, "query_recent_predictions", lambda window_seconds: rows)
 
     report = drift.run_drift_check()
     assert report["status"] in ("ok", "warning", "alert")  # a real verdict, not a short-circuit

@@ -1,54 +1,65 @@
 # Model Plan
 
-This document explains **why** the sentiment-prediction pipeline is built the way it is — the reasoning behind each step, not just what the code does. It's written for someone new to NLP/ML pipelines, not just for someone reading the code.
+This explains **why** the sentiment-prediction pipeline is built the way it is, not just what the code does. It's written for someone new to machine-learning pipelines.
 
 ## The problem
-Each Amazon review comes with a `polarity` label: `1` (negative) or `2` (positive), plus free-text `title` and `text`. We're predicting sentiment (negative/positive) from the review — a binary text-classification problem.
 
-## Why title + body are combined into one `review_text` field
-`preprocess.py` concatenates `title` and `text` into a single `review_text` column (`concat_ws(" ", title, text)`, which gracefully drops the title when one isn't present) before anything else happens. The reasoning: a review's title is often a *concentrated* sentiment signal on its own — someone titling a review "Terrible, don't buy!!" has told you most of what you need to know before the body even starts. Throwing the title away would discard a cheap, high-signal feature; combining it with the body instead of modeling it as a separate feature keeps the rest of the pipeline (Tokenizer onward) unchanged — the model just sees more (and often more concentrated) text per review. Every stage below — and `train.py`, `predict.py`, and the API's `/predict` endpoint — operate on `review_text`, never on `text` alone, so training and serving always see the same kind of input.
+Each Amazon review comes with a `polarity` label — `1` for negative, `2` for positive — plus free-text `title` and `text`. The goal is to predict that label from the review text: a binary classification problem (is this review negative or positive?).
 
-## Why this pipeline, stage by stage
-Each stage below links to the matching cell in [`02_pipeline_walkthrough.ipynb`](../notebooks/02_pipeline_walkthrough.ipynb) — on GitHub that link jumps straight to and runs that stage's actual code; opened locally in Jupyter/VS Code it just opens the notebook (cell-level jump isn't guaranteed everywhere, but the notebook itself is short and in the same stage order as here).
+## Why the title and body are combined
+
+`preprocess.py` joins `title` and `text` into one `review_text` column before anything else happens (`concat_ws(" ", title, text)`, which just uses the title on its own if the body is missing). The reasoning: a review's title is often a strong sentiment signal by itself. Someone who titles a review "Terrible, don't buy!!" has already told you most of what you need to know. Throwing that away would waste a cheap, useful piece of information. Combining it with the body — rather than treating it as a separate input — also keeps every later step of the pipeline unchanged: the model just sees more text per review. `train.py`, `predict.py`, and the API's `/predict` endpoint all work on `review_text`, never on `text` by itself, so the model is always trained and used on the same kind of input.
+
+## The pipeline, stage by stage
+
+Each stage links to the matching cell in [`02_pipeline_walkthrough.ipynb`](../src/notebooks/02_pipeline_walkthrough.ipynb). On GitHub, the link jumps straight to that stage's code and lets you run it; opened locally the link just opens the notebook, which is short and follows the same order as this document.
 
 ### 1. Tokenizer
-▶ [Run this stage](../notebooks/02_pipeline_walkthrough.ipynb#stage-1-tokenizer)
 
-Splits `review_text` into individual words ("This product is great" -> `["this", "product", "is", "great"]`). Machine learning models work with numbers, not sentences, so the first step in any text pipeline is breaking text into discrete units (tokens) that can eventually be turned into numeric features.
+▶ [Run this stage](../src/notebooks/02_pipeline_walkthrough.ipynb#stage-1-tokenizer)
+
+Splits `review_text` into individual words: "This product is great" becomes `["this", "product", "is", "great"]`. Models work with numbers, not sentences, so the first step in any text pipeline is breaking the text into pieces that can eventually become numbers.
 
 ### 2. StopWordsRemover
-▶ [Run this stage](../notebooks/02_pipeline_walkthrough.ipynb#stage-2-stopwordsremover)
 
-Drops extremely common words ("the", "is", "a", ...) that carry little sentiment signal on their own. Removing them shrinks the vocabulary and lets the model spend its capacity on words that actually distinguish positive from negative reviews (e.g. "great", "terrible", "disappointed").
+▶ [Run this stage](../src/notebooks/02_pipeline_walkthrough.ipynb#stage-2-stopwordsremover)
 
-### 3. HashingTF (why hashing, not a plain word-count vocabulary)
-▶ [Run this stage](../notebooks/02_pipeline_walkthrough.ipynb#stage-3-hashingtf)
+Drops extremely common words like "the", "is", and "a" that carry almost no sentiment on their own. Removing them shrinks the vocabulary and lets the model focus on words that actually separate positive reviews from negative ones, like "great", "terrible", or "disappointed".
 
-Converts the remaining words into a fixed-size numeric vector by hashing each word to a bucket index. The alternative — building an explicit vocabulary (`CountVectorizer`) that maps every unique word to its own column — needs a full pass over the data to build that vocabulary and grows without bound as new words appear. Hashing trades a small, usually negligible risk of two different words landing in the same bucket ("hash collisions") for a fixed memory footprint and no separate vocabulary-building pass — a good trade at the scale of ~3.6M reviews.
+### 3. HashingTF — turning words into numbers
 
-### 4. IDF (Inverse Document Frequency)
-▶ [Run this stage](../notebooks/02_pipeline_walkthrough.ipynb#stage-4-idf-inverse-document-frequency)
+▶ [Run this stage](../src/notebooks/02_pipeline_walkthrough.ipynb#stage-3-hashingtf)
 
-Re-weights the hashed term-frequency vector so that words appearing in *almost every* review (even after stopword removal) count for less, and words that are rarer-but-informative count for more. TF alone treats "good" and "phenomenal" as equally important if they appear the same number of times; IDF recognizes that rarer words are often more discriminative.
+Converts the remaining words into a fixed-size numeric vector by hashing each word to a bucket number. The alternative — building an explicit list mapping every unique word in the dataset to its own column (`CountVectorizer`) — needs a full pass over the data first and keeps growing as new words show up. Hashing accepts a small, usually harmless risk that two different words land in the same bucket ("collide") in exchange for a fixed memory footprint and no separate vocabulary-building step — a reasonable trade at this dataset's size, around 3.6 million reviews.
+
+### 4. IDF — weighing rare words more heavily
+
+▶ [Run this stage](../src/notebooks/02_pipeline_walkthrough.ipynb#stage-4-idf-inverse-document-frequency)
+
+IDF stands for Inverse Document Frequency. It re-weights the word counts from the previous step so that words appearing in almost every review — even after removing stopwords — count for less, while rarer, more distinctive words count for more. Without this step, "good" and "phenomenal" would be treated as equally important just because they show up the same number of times, even though the rarer word usually tells you more.
 
 ### 5. LogisticRegression
-▶ [Run this stage](../notebooks/02_pipeline_walkthrough.ipynb#stage-5-logisticregression)
 
-The classifier itself. Chosen as the baseline over more complex models (e.g. deep neural nets) because: it's fast to train even on millions of sparse text-vector rows, it's directly interpretable (each feature gets a signed weight — you can inspect which hashed word-buckets push toward "positive" vs "negative"), and it's a strong, well-understood baseline for text classification. Once this baseline works end-to-end, swapping in a fancier classifier later is a one-line change (the rest of the pipeline stays the same).
+▶ [Run this stage](../src/notebooks/02_pipeline_walkthrough.ipynb#stage-5-logisticregression)
 
-## Why cross-validation + hyperparameter tuning
-A single train/test split tells you how one specific model configuration performs on one specific slice of data — it doesn't tell you whether that configuration was actually the best choice, or whether the result was a bit of luck in how the data happened to split.
+The classifier itself. Logistic regression was chosen over something more complex, like a deep neural network, for three reasons: it trains fast even on millions of rows, it's easy to inspect (each feature gets a weight, so you can see which words push a prediction toward positive or negative), and it's a well-understood, reliable starting point for text classification. If a more advanced model is ever needed, only this last stage has to change — the rest of the pipeline stays the same.
 
-- **K-fold cross-validation (k=5)**: instead of one train/test split, the training data is split into 5 folds; the model trains on 4 and validates on the 1 left out, five times (rotating which fold is held out). The average performance across all 5 folds is a much more reliable estimate than any single split.
-- **Hyperparameter grid** (`ParamGridBuilder`): rather than guessing values for `HashingTF.numFeatures`, `LogisticRegression.regParam`, and `elasticNetParam`, we try a small grid of combinations (2 x 2 x 2 = 8) and let cross-validation tell us which combination generalizes best — rather than which one merely fits the training data best.
-- **`CrossValidator`** ties these together: it runs the 5-fold evaluation for *every* combination in the grid and returns the pipeline refit with the best-performing combination.
+## Why hyperparameter tuning, and why Optuna
 
-## Why a separate train/validation split *on top of* cross-validation
-Cross-validation already gives an estimate of how well each hyperparameter combination generalizes — so why also carve out a validation set?
+A single train/test split only tells you how one specific model setup performed on one specific slice of data. It doesn't tell you whether that setup was actually the best choice, or whether the result was partly luck in how the data happened to split. Guessing values for settings like `HashingTF`'s bucket count or `LogisticRegression`'s regularization strength isn't reliable either — some combinations generalize much better than others, and there's no way to know which without actually trying them.
 
-- The 80% "training" split is what `CrossValidator` folds internally.
-- The 20% "validation" split is data the tuning process **never sees at all** — not even as a CV fold. After `CrossValidator` picks a winner, we check that winner once against this fresh slice as a sanity check that the CV process wasn't itself misleading (e.g. due to some subtle data leakage across folds).
-- The fully separate `test.parquet` (the file `evaluate.py` uses) is **never touched during training or tuning at all** — it's reserved purely to report a final, unbiased estimate of how the finished model performs on data it has never influenced in any way. Three tiers — CV folds, validation split, held-out test set — each answering a slightly different question, and each protecting against a different way a model's reported performance can be misleadingly optimistic.
+`train.py` searches for good values using **Optuna**, a hyperparameter optimization library. The earlier approach (still visible in `docs/MODEL_HISTORY.md`'s v1–v3 entries) tried a small, fixed grid of hand-picked combinations — 8 in total — and checked each one with k-fold cross-validation. Optuna instead works adaptively: each *trial* tries one set of values, and every later trial's choice is informed by what every earlier trial scored, using a search strategy called TPE (Tree-structured Parzen Estimator). This lets it search a much wider, continuous range of values — not just a handful of fixed points — while still converging on good settings, typically needing fewer wasted trials than trying every combination in a large grid would.
+
+To keep each trial affordable, the default is to score a trial with a single train/validation split rather than k-fold cross-validation — one fit and one check, instead of several. That's a noisier estimate per trial than k-fold gives, but the tradeoff is deliberate: it means many more trials fit in the same amount of time, and Optuna's adaptive search makes good use of that extra volume. `train.py --cv-folds N` (default 1, meaning "off") switches every trial to real k-fold cross-validation instead — worth turning on mainly when training on a small sample, where a single validation split would be too small to trust, at the cost of each trial taking roughly N times longer.
+
+## What "validation" means during tuning
+
+- The 80% **training** portion is what every trial (and the final winner) actually fits on.
+- The 20% **validation** portion is what every trial is scored against. Because Optuna uses that score to decide what to try next, this split is now part of the search itself, not a one-time check performed only at the end.
+- The separate `test.parquet` file, used only by `evaluate.py`, is still never touched during training or tuning. It exists purely to report one final, unbiased score once a model is finished — a number from data the model's development never influenced in any way.
+
+The held-out test set is what keeps the final reported number honest — everything before that point (training and validation both) is fair game for the search process to use.
 
 ## Where MLflow fits in
-Every `CrossValidator` run here means fitting 8 hyperparameter combinations x 5 folds = 40 individual models. Comparing 40 sets of metrics by hand doesn't scale — MLflow logs each run's parameters and metrics automatically, which is also the data source for the "did tuning actually help" chart in `evaluate.py` (baseline vs. best-tuned accuracy/AUC side by side).
+
+Each Optuna search here fits a few dozen separate models (30 by default, one per trial). Comparing that many sets of results by hand doesn't scale, so MLflow logs every trial's settings and score automatically. That log is also what `evaluate.py` uses to build its "did tuning actually help" chart, comparing baseline and best-tuned accuracy and AUC side by side.

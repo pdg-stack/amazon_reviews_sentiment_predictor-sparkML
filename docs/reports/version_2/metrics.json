@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "model_uri": "/workspace/models/mlruns/1/28b55e271e614adf9f5a9e460eeae1fa/artifacts/model",
+  "accuracy": 0.8774425,
+  "f1": 0.8774356103484807,
+  "auc": 0.9450370394500002,
+  "evaluated_at": "2026-09-22T19:45:19.529961"
+}

@@ -1,0 +1,20 @@
+# One datasource, the `app` database's own RDS credentials -- no Prometheus
+# anywhere in this stack (see the plan: predictions/drift visualization is
+# plain SQL over app.predictions/app.drift_checks, nothing scraped).
+# $APP_DB_* come from .env.aws via docker-compose.cloud.yml's env_file.
+apiVersion: 1
+
+datasources:
+  - name: app
+    uid: app
+    type: postgres
+    access: proxy
+    url: $APP_DB_HOST:$APP_DB_PORT
+    database: $APP_DB_NAME
+    user: $APP_DB_USER
+    secureJsonData:
+      password: $APP_DB_PASSWORD
+    jsonData:
+      sslmode: require
+      postgresVersion: 1600
+    isDefault: true
