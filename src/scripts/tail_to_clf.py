@@ -10,6 +10,17 @@ GoAccess's most mature, best-tested input format -- avoids that risk
 entirely, at the cost of this one small conversion step.
 
 Run with: python3 src/scripts/tail_to_clf.py logs/api_requests.log
+
+--once reads whatever's currently in the file, top to bottom, and exits
+instead of waiting for new lines -- used by the cloud deployment's
+periodic-regeneration loop (see docker-compose.cloud.yml) instead of
+follow()'s continuous tail. See that file's comment for why: GoAccess's
+--real-time-html mechanism only ever rewrites its output file in response
+to a connected WebSocket client, which nginx's static-file serving of
+that output (see docker/nginx.conf's /logs/ comment) never provides --
+confirmed directly, the file sat byte-for-byte unchanged through an entire
+live load test's worth of real traffic. A one-shot full-file batch
+re-render, re-run on a timer, doesn't depend on a WebSocket at all.
 """
 
 import json
@@ -25,7 +36,14 @@ def to_clf_line(entry: dict) -> str:
     method = entry.get("method", "GET")
     path = entry.get("path", "/")
     status = entry.get("status", 200)
-    return f'127.0.0.1 - - [{clf_time}] "{method} {path} HTTP/1.1" {status} 0'
+    # GoAccess's built-in --log-format=COMBINED is specifically
+    # `%h %^[%d:%t %^] "%r" %s %b "%R" "%u"` (see /etc/goaccess/goaccess.conf
+    # in the image) -- it needs the trailing quoted referrer + user-agent
+    # fields too, even if there's nothing real to put in them, or its parser
+    # rejects the whole line ("Token for '%b' specifier is NULL") -- this
+    # project doesn't track either value, so "-" (the standard CLF "absent
+    # field" placeholder) stands in for both.
+    return f'127.0.0.1 - - [{clf_time}] "{method} {path} HTTP/1.1" {status} 0 "-" "-"'
 
 
 def _open_at_start(path: str):
@@ -33,6 +51,19 @@ def _open_at_start(path: str):
     comment on why this script never seeks to end."""
     f = open(path)
     return f, os.fstat(f.fileno()).st_ino
+
+
+def dump_once(path: str) -> None:
+    with open(path) as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            try:
+                print(to_clf_line(entry), flush=True)
+            except (KeyError, ValueError):
+                continue
 
 
 def follow(path: str):
@@ -87,4 +118,8 @@ def follow(path: str):
 
 
 if __name__ == "__main__":
-    follow(sys.argv[1])
+    args = sys.argv[1:]
+    if args and args[0] == "--once":
+        dump_once(args[1])
+    else:
+        follow(args[0])

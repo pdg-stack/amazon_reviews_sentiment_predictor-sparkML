@@ -59,29 +59,32 @@ services:
     image: 183088117536.dkr.ecr.us-east-1.amazonaws.com/arsp-log-viewer:latest
     container_name: log-viewer
     working_dir: /workspace
-    # Continuation lines MUST stay at this same indentation, not deeper (not
-    # visually aligned under the opening quote) -- YAML's folded scalar (>)
-    # only replaces a line break with a space when consecutive lines share
-    # the same indentation; a MORE-indented line keeps its break literal.
-    # A deeper-indented version of this exact block produced a command
-    # string with real embedded newlines, which a shell treats as three
-    # separate statements -- the trailing "|" continues the pipe onto the
-    # next line, but --real-time-html then ran as its own (nonexistent)
-    # command: "sh: --real-time-html: not found", confirmed by testing.
+    # NOT --real-time-html here (unlike docker-compose.yml's local service,
+    # where it's correct) -- that mode only ever rewrites its output file in
+    # response to a connected WebSocket client. Locally, a browser hits
+    # GoAccess's own embedded httpd directly, so the WebSocket genuinely
+    # connects. Here, nginx serves log-viewer-report.html as a plain static
+    # file instead of proxying to that httpd (GoAccess's embedded server
+    # rejects plain page loads outright -- see docker/nginx.conf's /logs/
+    # comment), so no WebSocket client ever connects, and --html-refresh
+    # (which only triggers the browser-side auto-reload, not a server-side
+    # rewrite) can't fix that either -- confirmed directly: the file sat
+    # byte-for-byte unchanged through an entire live load test's worth of
+    # real traffic, not just at idle.
     #
-    # --html-refresh=10: without it, --real-time-html writes
-    # log-viewer-report.html ONCE at startup and relies entirely on the
-    # WebSocket connection for every update after that -- confirmed by
-    # testing, the file sat byte-for-byte unchanged for 7+ hours of real
-    # traffic. Since nginx serves this file directly instead of proxying to
-    # that WebSocket (see docker/nginx.conf's /logs/ comment -- GoAccess's
-    # embedded httpd on that port rejects plain page loads outright), the
-    # file needs to be periodically rewritten on its own; this flag does
-    # that every 10 seconds, independent of the WebSocket entirely.
+    # Instead: a plain loop re-renders the whole report from scratch every
+    # 15s, in one-shot (non-real-time) GoAccess batch mode -- no WebSocket
+    # involved at all, so nothing needs one to connect. tail_to_clf.py
+    # --once reads whatever's currently in the log and exits, rather than
+    # following it forever. Continuation lines must stay at this exact
+    # indentation (see docker-compose.yml's identical warning on why a
+    # deeper indent breaks this).
     command: >
-      sh -c "python3 src/scripts/tail_to_clf.py logs/api_requests.log |
-      goaccess --log-format=COMBINED -o /workspace/logs/log-viewer-report.html
-      --real-time-html --html-refresh=10 --port=7890 --addr=0.0.0.0 --no-global-config -"
+      sh -c "while true; do
+      python3 src/scripts/tail_to_clf.py --once logs/api_requests.log |
+      goaccess --log-format=COMBINED -o /workspace/logs/log-viewer-report.html --no-global-config -;
+      sleep 15;
+      done"
     restart: unless-stopped
     volumes:
       - .:/workspace
