@@ -5,7 +5,7 @@ the process just to answer /predict calls.
 
 Why this exists: the original serving path ran every /predict call through
 `model.transform(df)` against that long-lived SparkSession. Fine at low
-concurrency, but a real load test (docs/CLOUD_DEPLOYMENT_PLAN.md) showed it
+concurrency, but a real load test (docs/DEPLOYMENT.md) showed it
 collapsing well before the target 1,000 concurrent requests. The actual
 computation a /predict call needs -- a few hundred hashed-feature lookups
 and one dot product -- is trivial; what doesn't scale is that each call

@@ -26,7 +26,7 @@ resource "aws_wafv2_web_acl" "main" {
         # ~6000 in a rolling 5-min window -- and Modal's calls come from a
         # small/shared set of egress IPs, not 1000 distinct ones, so this
         # whole load concentrates onto very few source IPs (flagged as a
-        # risk in docs/CLOUD_DEPLOYMENT_PLAN.md's original Phase 2 design).
+        # risk, since its calls concentrate onto very few source IPs).
         # Lower this back down once the load test is done.
         limit              = 20000 # requests per 5-minute window per IP
         aggregate_key_type = "IP"

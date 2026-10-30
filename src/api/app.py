@@ -13,7 +13,7 @@ startup and scores every /predict call with src/serving/lightweight_scorer.py
 -- no SparkSession involved in serving at all. A load test against an
 earlier version of this API, which DID keep an embedded SparkSession
 resident and score every request through it, found that path collapsing
-well before 1,000 concurrent requests (see docs/CLOUD_DEPLOYMENT_PLAN.md):
+well before 1,000 concurrent requests (see docs/DEPLOYMENT.md):
 each request still paid Spark's fixed per-job overhead regardless of how
 little actual computation it needed. Batch scoring (predict.py, scoring
 millions of rows in one job) is a genuinely different workload shape and
