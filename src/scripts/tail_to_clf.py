@@ -30,12 +30,44 @@ import time
 from datetime import datetime
 
 
+def _fake_ip_for_visitor(api_key_id: str) -> str:
+    # GoAccess's %h token parser validates that whatever sits there is
+    # actually IP-shaped -- confirmed by testing (in isolation, bypassing
+    # the real log entirely): "no-key", "00000000", and even genuine
+    # api_key_id hex strings like "a1b2c3d4" are ALL rejected with "Token
+    # '...' doesn't match specifier '%h'". A hostname-ish string doesn't
+    # satisfy it either; it really does need dotted-quad shape. Converting
+    # the key's first 3 bytes (6 hex chars) into a private-range-looking
+    # 10.x.y.z address keeps the one property that actually matters here --
+    # a stable, distinct value per key, which is all GoAccess's "unique
+    # visitors" grouping cares about -- while satisfying the validator.
+    # Each hex byte pair is 0-255 by construction, so this can never
+    # produce an invalid octet.
+    b1, b2, b3 = api_key_id[0:2], api_key_id[2:4], api_key_id[4:6]
+    return f"10.{int(b1, 16)}.{int(b2, 16)}.{int(b3, 16)}"
+
+
 def to_clf_line(entry: dict) -> str:
     ts = datetime.strptime(entry["timestamp"], "%Y-%m-%dT%H:%M:%S")
     clf_time = ts.strftime("%d/%b/%Y:%H:%M:%S +0000")
     method = entry.get("method", "GET")
     path = entry.get("path", "/")
     status = entry.get("status", 200)
+    # GoAccess's "visitor" concept is just whatever string sits in the %h
+    # ("host") slot. Using the real client_ip here would make every row
+    # collapse to one "visitor": in the cloud deployment client_ip is
+    # nginx's own container IP (every request reaches the api container
+    # FROM nginx, not from the real caller), and even where it isn't,
+    # Modal's load generator calls from a small shared pool of egress IPs
+    # rather than one per simulated session anyway. api_key_id (src/api/
+    # app.py's _api_key_id()) is the one thing this project actually
+    # assigns distinctly per simulated caller -- _fake_ip_for_visitor()
+    # reshapes it into something %h's validator will accept.
+    # Not an all-zero id -- a 10.0.0.0 network-address-shaped result seemed
+    # to get treated specially (excluded from the unique-visitor count)
+    # rather than counted as its own distinct visitor like every other
+    # value here. "2a2a2a00" -> 10.42.42.42, an ordinary-looking address.
+    visitor = _fake_ip_for_visitor(entry.get("api_key_id") or "2a2a2a00")
     # GoAccess's built-in --log-format=COMBINED is specifically
     # `%h %^[%d:%t %^] "%r" %s %b "%R" "%u"` (see /etc/goaccess/goaccess.conf
     # in the image) -- it needs the trailing quoted referrer + user-agent
@@ -43,7 +75,7 @@ def to_clf_line(entry: dict) -> str:
     # rejects the whole line ("Token for '%b' specifier is NULL") -- this
     # project doesn't track either value, so "-" (the standard CLF "absent
     # field" placeholder) stands in for both.
-    return f'127.0.0.1 - - [{clf_time}] "{method} {path} HTTP/1.1" {status} 0 "-" "-"'
+    return f'{visitor} - - [{clf_time}] "{method} {path} HTTP/1.1" {status} 0 "-" "-"'
 
 
 def _open_at_start(path: str):

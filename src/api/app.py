@@ -137,6 +137,7 @@ async def log_requests(request: Request, call_next):
 
     client_ip = request.client.host if request.client else None
     user_agent = request.headers.get("user-agent")
+    api_key_id = _api_key_id(request)
 
     try:
         response = await call_next(request)
@@ -151,6 +152,7 @@ async def log_requests(request: Request, call_next):
             "latency_ms": latency_ms,
             "client_ip": client_ip,
             "user_agent": user_agent,
+            "api_key_id": api_key_id,
         }
         if raw_input is not None:
             entry["input"] = raw_input
@@ -185,6 +187,7 @@ async def log_requests(request: Request, call_next):
         "latency_ms": latency_ms,
         "client_ip": client_ip,
         "user_agent": user_agent,
+        "api_key_id": api_key_id,
     }
     if predict_detail:
         entry.update(predict_detail)
@@ -195,6 +198,17 @@ async def log_requests(request: Request, call_next):
         entry["input"] = raw_input
     request_logger.info(json.dumps(entry))
     return response
+
+
+def _api_key_id(request: Request) -> Optional[str]:
+    # A short, non-reversible fingerprint of the caller's key, not the key
+    # itself -- lets logs/the predictions table distinguish simulated
+    # callers from each other without ever persisting a real credential.
+    # Deliberately computed from whatever was sent, valid or not: a missing/
+    # wrong key still gets an id, so even rejected 401s are attributable to
+    # a consistent (if bogus) caller identity, same as a valid one.
+    api_key = request.headers.get("x-api-key")
+    return hashlib.sha256(api_key.encode()).hexdigest()[:8] if api_key else None
 
 
 def _combine(texts: List[str], titles: Optional[List[str]]) -> List[str]:
@@ -249,10 +263,8 @@ def predict(payload: PredictRequest, request: Request) -> Union[dict, List[dict]
 
     # One app.predictions row per text scored (a batch call scores several
     # texts in one request, so one API call can write several rows) -- a
-    # no-op locally where APP_DB_HOST isn't set. api_key_id is a short,
-    # non-reversible fingerprint of the caller's key, not the key itself.
-    api_key = request.headers.get("x-api-key")
-    api_key_id = hashlib.sha256(api_key.encode()).hexdigest()[:8] if api_key else None
+    # no-op locally where APP_DB_HOST isn't set.
+    api_key_id = _api_key_id(request)
     client_ip = request.client.host if request.client else None
     user_agent = request.headers.get("user-agent")
     model_version, run_id = _active_model_identity()

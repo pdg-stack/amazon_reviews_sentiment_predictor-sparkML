@@ -28,6 +28,15 @@
       "description": "Share of positive vs negative predictions in the selected time range. A sudden big swing (e.g. normally ~50/50, suddenly 95% negative) is worth checking -- either real-world sentiment genuinely shifted, or something about incoming traffic changed (see the Drift dashboard).",
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 5 },
       "datasource": { "type": "postgres", "uid": "app" },
+      "options": {
+        "pieType": "pie",
+        "displayLabels": ["name", "percent"],
+        "legend": { "displayMode": "list", "placement": "right", "values": ["value"] },
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "values": true
+        }
+      },
       "targets": [
         {
           "rawSql": "SELECT sentiment, count(*) AS value FROM predictions WHERE $__timeFilter(received_at) GROUP BY sentiment",

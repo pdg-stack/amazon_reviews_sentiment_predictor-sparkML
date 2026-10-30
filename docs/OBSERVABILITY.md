@@ -9,14 +9,17 @@ The API writes a log entry for every request it handles. Routine liveness checks
 **`logs/api_requests.log`** — one JSON line per entry:
 
 ```json
-{"timestamp": "...", "event": "access", "method": "POST", "path": "/predict", "status": 401, "latency_ms": 3.1, "input": {"text": "..."}}
+{"timestamp": "...", "event": "access", "method": "POST", "path": "/predict", "status": 401, "latency_ms": 3.1, "client_ip": "...", "user_agent": "...", "api_key_id": "a1b2c3d4", "input": {"text": "..."}}
 ```
+
+`api_key_id` is a short, non-reversible fingerprint (`sha256(key)[:8]`, see `src/api/app.py`'s `_api_key_id()`) of whatever `X-API-Key` header was sent — valid or not, present or absent (`null` if there was no header at all). It exists because `client_ip` usually can't distinguish callers here: in the cloud deployment it's always nginx's own container IP (every request reaches the api container *from* nginx, not from the real caller), and even where a real IP is visible, a load generator calling from a small shared pool of egress IPs would still collapse to a handful of "visitors" regardless. Each simulated caller in `src/scripts/modal_load_test.py` is assigned its own key specifically so this field — not IP — is what actually identifies a distinct caller; GoAccess's dashboard (below) keys its "unique visitors" count off this field for exactly that reason.
 
 `event` is `"access"` for most entries, or `"predict"` for a *successful* `/predict` call, which carries more detail:
 
 ```json
 {
   "timestamp": "...", "event": "predict", "method": "POST", "path": "/predict", "status": 200, "latency_ms": 812.4,
+  "client_ip": "...", "user_agent": "...", "api_key_id": "a1b2c3d4",
   "input": {"text": [...], "title": [...]},
   "results": [{"sentiment": "positive", "probability": 0.87}],
   "review_text_lengths": [14]
@@ -37,7 +40,11 @@ Three loggers exist in `src/api/logging_config.py`: `api.requests` (the first fi
 
 ### Browsing the logs
 
-For a quick live view, [Logdy](https://logdy.dev) (open source, self-hosted) can tail either file straight into a browser with no setup. For actual analysis — charts of request volume, status codes, and response times over time, not just a live feed — the `log-viewer` service (in both `docker-compose.yml` locally and `docker-compose.cloud.yml` in the cloud deployment) runs [GoAccess](https://goaccess.io) (also open source) against `logs/api_requests.log` and serves a dashboard, at `http://localhost:8081` locally or `/logs/` on the cloud deployment's CloudFront domain (see `docs/DEPLOYMENT.md`). GoAccess expects a well-known access-log format, so a small script (`src/scripts/tail_to_clf.py`) converts this project's JSON lines into that format on the fly — the log file itself doesn't need to change.
+For a quick live view, [Logdy](https://logdy.dev) (open source, self-hosted) can tail either file straight into a browser with no setup. For actual analysis — charts of request volume, status codes, and response times over time, not just a live feed — the `log-viewer` service (in both `docker-compose.yml` locally and `docker-compose.cloud.yml` in the cloud deployment) runs [GoAccess](https://goaccess.io) (also open source) against `logs/api_requests.log` and serves a dashboard, at `http://localhost:8081` locally or `/logs/` on the cloud deployment's CloudFront domain (see `docs/DEPLOYMENT.md`). GoAccess expects a well-known access-log format, so a small script (`src/scripts/tail_to_clf.py`) converts this project's JSON lines into that format on the fly — the log file itself doesn't need to change. That conversion puts `api_key_id` (see above), not `client_ip`, into the access-log format's "host" field — so GoAccess's own "Unique Visitors" panel is actually counting distinct callers, not distinct IPs, which here would mostly collapse to one.
+
+![GoAccess dashboard showing 2,402 requests parsed from a real load test, with request/visitor breakdowns by URL](screenshots/goaccess-dashboard.png)
+
+*The dashboard mid-way through a real load test. "Unique Visitors: 1" in this particular capture predates the `api_key_id`-based visitor identification described above — taken against an earlier build, it's showing the `client_ip`-based count collapsing to one caller, exactly the problem that change fixes.*
 
 **Two cloud-specific wrinkles**: GoAccess's own embedded web server (the port it listens on, `7890`) serves a WebSocket for live updates, not general page requests — a plain page load against it gets flatly rejected. The real dashboard content is the single static HTML file GoAccess writes to disk (`logs/log-viewer-report.html`, self-contained, no external assets), which nginx serves directly in the cloud deployment instead of proxying to that port.
 
@@ -51,6 +58,14 @@ Two more dashboards exist only in the cloud deployment (`/grafana/` on the Cloud
 - **Drift**: PSI per signal over time, plus status and sample size — from the `app.drift_checks` table, written by every `GET /admin/drift-report` call (see below for what triggers that).
 
 Why a database instead of files for these two: Grafana reads SQL, not JSON log lines, and a table of structured rows is also what makes the PSI trend over time queryable at all — the drift check below computes one PSI value per call, and something needs to persist that history for a trend line to exist.
+
+![Grafana Predictions dashboard: sentiment split pie chart, confidence distribution histogram, and predictions-per-minute line chart during a load test](screenshots/grafana-predictions-dashboard.png)
+
+*Mid-load-test, with predictions-per-minute clearly tracking the test's bell-curve traffic shape. The "Sentiment split" pie renders as a single undifferentiated circle here rather than two labeled slices — taken before a fix for a real Grafana piechart gotcha: by default it reduces each numeric field to one aggregate value rather than slicing per row, collapsing `sentiment`/`value` into a single "value" slice instead of splitting by `sentiment`. `options.reduceOptions.values: true` (now set in `grafana/provisioning/dashboards/json/predictions.json`) fixes it.*
+
+![Grafana Drift dashboard: PSI per signal over time crossing the warning threshold, a status timeline, and sample size per check](screenshots/grafana-drift-dashboard.png)
+
+*The PSI spike crossing the 0.10 warning line near the start reflects the load test's traffic pattern differing from the training-time baseline (see "Reading a report" below) — exactly the kind of signal this dashboard exists to surface. The "Status over time" panel's `waok` label is two adjacent state segments' text (a `warning` segment and the `ok` segment next to it) overlapping at this zoom/width, not a real status value — zooming the time range in (the picker now works, see the fix above) separates them.*
 
 ## Metrics
 
