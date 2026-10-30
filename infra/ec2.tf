@@ -104,6 +104,19 @@ resource "aws_instance" "serving" {
   vpc_security_group_ids = [aws_security_group.ec2.id]
   iam_instance_profile   = aws_iam_instance_profile.ec2.name
 
+  # No explicit size before this meant AL2023's default: 8GiB, which proved
+  # too small to even BUILD the api image locally on the instance (pyspark's
+  # sdist build alone needs several GB of scratch space) -- confirmed by
+  # testing, it failed with "No space left on device" mid-build even right
+  # after clearing all reclaimable Docker build cache. 30GiB gives real
+  # headroom for image layers, Spark/MLflow scratch space, and logs.
+  # volume_size resizes the existing EBS volume online (ModifyVolume),
+  # in-place -- this does not replace/recreate the instance.
+  root_block_device {
+    volume_size = 30
+    volume_type = "gp3"
+  }
+
   # Docker + compose plugin only -- the actual stack (docker-compose.cloud.yml)
   # is deployed afterward via SSM, not baked into the AMI/user-data.
   user_data = <<-EOF
