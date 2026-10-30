@@ -1,22 +1,22 @@
 """
-Modal load generator for the live Phase 2 API (docs/CLOUD_DEPLOYMENT_PLAN.md's
-Phase 2 spec): a 20-minute bell-curve of simulated sessions peaking at 1000
-concurrent, each drawing review text from the held-out test.parquet pool
-(data/scripts/make_training_sample.py never touches this file -- it's
-reserved for inference/load-testing, never training) so the live traffic the
-API sees is realistic, not synthetic filler.
+Modal load generator for the live API (docs/DEPLOYMENT.md): a 20-minute
+bell-curve of simulated sessions peaking at 1000 concurrent, each drawing
+review text from the held-out test.parquet pool (data/scripts/
+make_training_sample.py never touches this file -- it's reserved for
+inference/load-testing, never training) so the live traffic the API sees
+is realistic, not synthetic filler.
 
-Session shape, matching the plan's own math: an initial request of 10-20
-rows, then a 5-row batch every 1 minute for a 4-minute session (~30 rows,
+Session shape: an initial request of 10-20 rows, then a 5-row batch every
+1 minute for a 4-minute session (~30 rows,
 4 requests/session). ~1000 concurrent lightweight async HTTP sessions is
 I/O-bound, cheap work -- this all runs as ONE asyncio event loop inside a
 single Modal container, not a distributed fan-out across many containers.
 
 Each session is assigned one API key from a pool (generate_api_key.py
 --count N) rather than everyone sharing one key, so request logs/predictions
-reflect many distinct simulated callers, not one. Keys are passed in as a
-Modal Secret built from the local .env at launch time -- never baked into
-the image, never printed.
+reflect many distinct simulated callers, not one. Keys and the target
+CloudFront domain are passed in as a Modal Secret built from the local
+.env/.env.aws at launch time -- never baked into the image, never printed.
 
 Run with:
     modal run src/scripts/modal_load_test.py
@@ -34,7 +34,6 @@ import modal
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DATA_POOL_PATH = PROJECT_ROOT / "data" / "processed" / "loadtest_pool.json"
 
-API_URL = "https://dl3uvj6jcn78t.cloudfront.net/predict"
 TOTAL_MINUTES = 20
 PEAK_CONCURRENCY = 1000
 SESSION_MINUTES = 4
@@ -50,21 +49,25 @@ image = (
 )
 
 
-def _load_api_keys_secret() -> modal.Secret:
-    # Read directly from the local .env, never printed -- API_KEYS (the
-    # pool) if present, else the single API_KEY repeated (works, just
-    # models every session as the same caller).
+def _load_secrets() -> modal.Secret:
+    # Read directly from the local .env/.env.aws, never printed -- API_KEYS
+    # (the pool, from .env) if present, else the single API_KEY repeated
+    # (works, just models every session as the same caller), plus
+    # CLOUDFRONT_DOMAIN (from .env.aws) so the target URL isn't hardcoded.
     #
     # This whole module gets re-imported inside the remote container too
     # (Modal reconstructs the function reference from source there), where
-    # .env obviously doesn't exist -- confirmed by testing: it crashed with
+    # neither file exists -- confirmed by testing: it crashed with
     # FileNotFoundError before the function ever ran. The secret's real
     # values were already registered from THIS local evaluation by the time
     # that remote re-import happens, so returning a harmless placeholder
     # there (rather than the real file contents) doesn't lose anything.
     env_path = PROJECT_ROOT / ".env"
-    if not env_path.exists():
-        return modal.Secret.from_dict({"API_KEYS": "placeholder-remote-reimport-only"})
+    env_aws_path = PROJECT_ROOT / ".env.aws"
+    if not env_path.exists() or not env_aws_path.exists():
+        return modal.Secret.from_dict(
+            {"API_KEYS": "placeholder-remote-reimport-only", "CLOUDFRONT_DOMAIN": "placeholder-remote-reimport-only"}
+        )
 
     values = {}
     for line in env_path.read_text().splitlines():
@@ -73,6 +76,15 @@ def _load_api_keys_secret() -> modal.Secret:
             values[name] = value
     if "API_KEYS" not in values and "API_KEY" not in values:
         raise RuntimeError("No API_KEY/API_KEYS found in .env -- run generate_api_key.py first.")
+
+    for line in env_aws_path.read_text().splitlines():
+        if line.startswith("CLOUDFRONT_DOMAIN="):
+            name, _, value = line.partition("=")
+            values[name] = value
+    if "CLOUDFRONT_DOMAIN" not in values:
+        raise RuntimeError(
+            "No CLOUDFRONT_DOMAIN found in .env.aws -- run `tofu output cloudfront_domain` in infra/ and add it."
+        )
     return modal.Secret.from_dict(values)
 
 
@@ -85,7 +97,7 @@ def _bell_curve_new_sessions_per_minute() -> list[int]:
     return counts
 
 
-@app.function(image=image, timeout=TOTAL_MINUTES * 60 + SESSION_MINUTES * 60 + 120, secrets=[_load_api_keys_secret()])
+@app.function(image=image, timeout=TOTAL_MINUTES * 60 + SESSION_MINUTES * 60 + 120, secrets=[_load_secrets()])
 async def generate_load():
     import asyncio
 
@@ -96,6 +108,7 @@ async def generate_load():
 
     keys_raw = os.environ.get("API_KEYS") or os.environ.get("API_KEY")
     api_keys = [k for k in keys_raw.split(",") if k]
+    api_url = f"https://{os.environ['CLOUDFRONT_DOMAIN']}/predict"
 
     stats = {"requests_sent": 0, "requests_ok": 0, "requests_failed": 0, "sessions_started": 0}
 
@@ -115,7 +128,7 @@ async def generate_load():
             stats["requests_sent"] += 1
             try:
                 resp = await client.post(
-                    API_URL,
+                    api_url,
                     headers={"X-API-Key": api_key},
                     json={"titles": titles, "texts": texts},
                 )

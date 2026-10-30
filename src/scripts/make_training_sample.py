@@ -5,7 +5,7 @@ that file stays reserved for Phase 2's inference/load-test work (see
 docs/DEPLOYMENT.md), not training-time evaluation.
 
     python -m src.scripts.make_training_sample --fraction 0.05 --train-frac 0.8 \
-        --output-dir s3://arsp-183088117536-us-east-1/data/processed
+        --output-dir s3://<bucket>/data/processed
 
 Both the sample and the 80/20 split use the same seed (42) as every other
 sampling/splitting operation in this project (preprocess.py, train.py), so

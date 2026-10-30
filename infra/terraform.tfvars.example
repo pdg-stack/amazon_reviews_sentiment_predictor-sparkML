@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars (gitignored) and fill in with your own values.
+# terraform.tfvars is read automatically by `tofu plan`/`tofu apply` -- no
+# extra flag needed.
+
+aws_account_id = "<your-aws-account-id>"
+github_repo    = "<your-github-org>/<your-repo-name>"

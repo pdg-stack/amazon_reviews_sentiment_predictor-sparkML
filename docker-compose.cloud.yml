@@ -6,8 +6,7 @@
 # well before 1,000 concurrent requests). It scores requests via
 # src/serving/lightweight_scorer.py instead, reading the active model's
 # exported parameters off the bind mount below -- see that module's
-# docstring and docs/CLOUD_DEPLOYMENT_PLAN.md's "What the load test
-# actually found" section for why.
+# docstring and docs/ARCHITECTURE_NOTES.md's "Cloud deployment" section for why.
 #
 # Phase 4: api/log-viewer are pre-built images from ECR (GitHub Actions
 # builds + pushes on merge to main, see .github/workflows/deploy.yml and
@@ -18,10 +17,13 @@
 #
 # Env comes from .env + .env.aws (same files/convention as local dev's
 # optional .env.aws -- see docker-compose.yml's own comment on that).
+# AWS_ACCOUNT_ID/AWS_REGION below are read from .env (compose's own
+# variable-substitution file, auto-loaded -- not .env.aws, which only
+# reaches containers via env_file:, never substitution at this level).
 
 services:
   api:
-    image: 183088117536.dkr.ecr.us-east-1.amazonaws.com/arsp-api:latest
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/arsp-api:latest
     container_name: api
     working_dir: /workspace
     command: uvicorn src.api.app:app --host 0.0.0.0 --port 8000
@@ -36,7 +38,7 @@ services:
       - .:/workspace
 
   mlflow-ui:
-    image: 183088117536.dkr.ecr.us-east-1.amazonaws.com/arsp-api:latest
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/arsp-api:latest
     container_name: mlflow-ui
     working_dir: /workspace
     # --static-prefix: see docker/nginx.conf's /mlflow/ location comment.
@@ -56,7 +58,7 @@ services:
     restart: unless-stopped
 
   log-viewer:
-    image: 183088117536.dkr.ecr.us-east-1.amazonaws.com/arsp-log-viewer:latest
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/arsp-log-viewer:latest
     container_name: log-viewer
     working_dir: /workspace
     # NOT --real-time-html here (unlike docker-compose.yml's local service,

@@ -1,14 +1,18 @@
-# Phase 3: survives the EC2 instance being replaced/resized (ec2.tf's role
-# already has s3:PutObject on this bucket). AL2023 ships no cron/crond by
-# default -- confirmed by testing -- so this pairs with log-sync.timer
-# instead of a crontab. Deploy: upload both files to S3 (see infra/README
-# or DEPLOYMENT.md), then on the instance:
+# Survives the EC2 instance being replaced/resized (ec2.tf's role already
+# has s3:PutObject on this bucket). AL2023 ships no cron/crond by default --
+# confirmed by testing -- so this pairs with log-sync.timer instead of a
+# crontab. Deploy: upload both files to S3, write the bucket/region into
+# /etc/arsp/log-sync.env on the instance (EnvironmentFile= below --
+# systemd does NOT expand $VARS in ExecStart on its own, hence the
+# `sh -c` wrapper), then:
 #   aws s3 cp s3://<bucket>/deploy/log-sync.service /etc/systemd/system/
 #   aws s3 cp s3://<bucket>/deploy/log-sync.timer /etc/systemd/system/
+#   printf 'S3_BUCKET=<bucket>\nAWS_REGION=<region>\n' > /etc/arsp/log-sync.env
 #   systemctl daemon-reload && systemctl enable --now log-sync.timer
 [Unit]
 Description=Sync application logs to S3
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/aws s3 sync /home/ec2-user/app/logs/ s3://arsp-183088117536-us-east-1/logs/ --region us-east-1
+EnvironmentFile=/etc/arsp/log-sync.env
+ExecStart=/bin/sh -c 'aws s3 sync /home/ec2-user/app/logs/ s3://${S3_BUCKET}/logs/ --region ${AWS_REGION}'

@@ -5,9 +5,8 @@ variable "aws_region" {
 }
 
 variable "aws_account_id" {
-  description = "AWS account ID (used to build a globally-unique S3 bucket name)."
+  description = "AWS account ID (used to build a globally-unique S3 bucket name). No default -- set in terraform.tfvars (gitignored, see terraform.tfvars.example)."
   type        = string
-  default     = "183088117536"
 }
 
 variable "project_prefix" {
@@ -50,7 +49,6 @@ variable "ec2_instance_type" {
 }
 
 variable "github_repo" {
-  description = "owner/repo whose main branch is trusted to assume the GitHub Actions deploy role (cicd.tf)."
+  description = "owner/repo whose main branch is trusted to assume the GitHub Actions deploy role (cicd.tf). No default -- set in terraform.tfvars (gitignored, see terraform.tfvars.example)."
   type        = string
-  default     = "pdg-stack/amazon_reviews_sentiment_predictor-sparkML"
 }
