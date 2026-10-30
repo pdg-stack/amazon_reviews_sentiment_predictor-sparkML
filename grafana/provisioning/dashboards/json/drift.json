@@ -6,12 +6,27 @@
   "editable": true,
   "time": { "from": "now-7d", "to": "now" },
   "refresh": "5m",
+  "timepicker": {
+    "hidden": false,
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h"]
+  },
   "panels": [
+    {
+      "id": 10,
+      "title": "Read me first",
+      "type": "text",
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "**Model drift** here does **not** mean \"the model got the wrong answer\" -- nobody labels incoming reviews in real time, so there's no way to check that directly. It means: does live traffic *look* like the traffic the model was evaluated on? A shift is a signal worth a human look, not proof the model is broken.\n\n**How it's measured -- PSI (Population Stability Index):** one number per signal, comparing the current distribution of a value (e.g. how confident predictions are) against the training-time baseline. This project reads it with the usual convention:\n- **< 0.10** -> `ok` -- looks like training\n- **0.10 - 0.25** -> `warning` -- some shift, worth watching\n- **>= 0.25** -> `alert` -- meaningfully different from training\n\nNew to PSI? [Arize: Population Stability Index (PSI) explained](https://arize.com/blog-course/population-stability-index-psi/) is a good plain-English start. For where PSI can mislead you, see [NannyML: PSI or not PSI?](https://nannymlnewsletter.substack.com/p/psi-or-not-psi-that-is-the-question)\n\nEvery check needs **30+ predictions** in its time window to produce a real number -- below that it reports `insufficient_data` (see the Sample size panel) rather than guessing. Use the time range picker (top right) to zoom in on any window -- every panel below respects it."
+      }
+    },
     {
       "id": 1,
       "title": "PSI per signal over time",
       "type": "timeseries",
-      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 0 },
+      "description": "One line per signal (prediction confidence, review length). Left-to-right is time; up is \"more different from the training baseline.\" The colored threshold lines mark 0.10 (warning) and 0.25 (alert) -- a line crossing into orange/red territory is the thing to investigate. A flat line near zero is the healthy, expected state.",
+      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 7 },
       "datasource": { "type": "postgres", "uid": "app" },
       "fieldConfig": {
         "defaults": {
@@ -28,7 +43,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT checked_at AS time, prediction_confidence_psi, review_length_psi FROM drift_checks ORDER BY checked_at",
+          "rawSql": "SELECT checked_at AS time, prediction_confidence_psi, review_length_psi FROM drift_checks WHERE $__timeFilter(checked_at) ORDER BY checked_at",
           "format": "time_series",
           "refId": "A"
         }
@@ -38,11 +53,12 @@
       "id": 2,
       "title": "Status over time",
       "type": "state-timeline",
-      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 0 },
+      "description": "One colored block per drift check (roughly every 2 minutes in the cloud deployment). Green = ok, orange = warning, red = alert -- whichever of the two PSI signals scores worse decides the color. A single red block might just be a traffic blip; a run of them is the real signal worth investigating.",
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 7 },
       "datasource": { "type": "postgres", "uid": "app" },
       "targets": [
         {
-          "rawSql": "SELECT checked_at AS time, status AS value FROM drift_checks ORDER BY checked_at",
+          "rawSql": "SELECT checked_at AS time, status AS value FROM drift_checks WHERE $__timeFilter(checked_at) ORDER BY checked_at",
           "format": "time_series",
           "refId": "A"
         }
@@ -52,11 +68,24 @@
       "id": 3,
       "title": "Sample size per check",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 9 },
+      "description": "How many predictions fed each check. Below 30 (the dashed threshold line), a check can't produce a trustworthy PSI at all and reports \"insufficient_data\" instead -- a dip here explains an \"insufficient_data\" status in the panel above, it isn't a separate problem.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
       "datasource": { "type": "postgres", "uid": "app" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "thresholdsStyle": { "mode": "dashed" } },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 30 }
+            ]
+          }
+        }
+      },
       "targets": [
         {
-          "rawSql": "SELECT checked_at AS time, sample_size FROM drift_checks ORDER BY checked_at",
+          "rawSql": "SELECT checked_at AS time, sample_size FROM drift_checks WHERE $__timeFilter(checked_at) ORDER BY checked_at",
           "format": "time_series",
           "refId": "A"
         }
