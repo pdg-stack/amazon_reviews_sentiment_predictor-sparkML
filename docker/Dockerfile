@@ -30,7 +30,8 @@ RUN pip install --no-cache-dir \
     optuna \
     psycopg2-binary \
     pytest \
-    boto3
+    boto3 \
+    mmh3
 
 # `pip install pyspark` bundles the full Spark distribution (jars, bin/,
 # sbin/) under site-packages/pyspark -- SPARK_HOME points Spark's own

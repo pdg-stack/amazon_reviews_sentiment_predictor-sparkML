@@ -1,8 +1,13 @@
 # Phase 2/3 cloud serving stack -- runs on the EC2 instance provisioned in
 # infra/ec2.tf, NOT locally. No spark-master/spark-worker/pipeline here
-# (EMR Serverless handles training, Phase 1) -- api runs its own embedded
-# local[*] Spark session, same as .devcontainer/local dev, since inference
-# is small-batch and doesn't need a cluster.
+# (EMR Serverless handles training, Phase 1) -- api runs NO Spark at all
+# (it used to run its own embedded local[*] session, same as
+# .devcontainer/local dev, but a real load test showed that collapsing
+# well before 1,000 concurrent requests). It scores requests via
+# src/serving/lightweight_scorer.py instead, reading the active model's
+# exported parameters off the bind mount below -- see that module's
+# docstring and docs/CLOUD_DEPLOYMENT_PLAN.md's "What the load test
+# actually found" section for why.
 #
 # Phase 4: api/log-viewer are pre-built images from ECR (GitHub Actions
 # builds + pushes on merge to main, see .github/workflows/deploy.yml and

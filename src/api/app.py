@@ -7,9 +7,17 @@ FastAPI real-time serving layer.
     GET  /health               (no auth)            -> {"status": "ok"}
     GET  /metrics               (no auth)            -> Prometheus text exposition
 
-Loads models/active/ (set by set_active_model.py) at startup and keeps the
-SparkSession resident for the life of the process -- fine for demo/dev
-latency, not a high-throughput production pattern (see docs/ARCHITECTURE_NOTES.md).
+Loads models/active/lightweight_model.json (exported from models/active/ by
+set_active_model.py, see src/serving/export_lightweight_model.py) at
+startup and scores every /predict call with src/serving/lightweight_scorer.py
+-- no SparkSession involved in serving at all. A load test against an
+earlier version of this API, which DID keep an embedded SparkSession
+resident and score every request through it, found that path collapsing
+well before 1,000 concurrent requests (see docs/CLOUD_DEPLOYMENT_PLAN.md):
+each request still paid Spark's fixed per-job overhead regardless of how
+little actual computation it needed. Batch scoring (predict.py, scoring
+millions of rows in one job) is a genuinely different workload shape and
+still uses real Spark -- see that script.
 
 Every request is logged as one JSON line (including client_ip/user_agent),
 via the log_requests middleware below. GET /health and GET /metrics
@@ -40,8 +48,6 @@ import os
 import time
 from typing import List, Optional, Union
 
-import mlflow
-import mlflow.spark
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
 from prometheus_client import Gauge
@@ -51,7 +57,8 @@ from pydantic import BaseModel
 from src.api import db, drift
 from src.api.logging_config import app_logger, probe_logger, request_logger
 from src.api.security import require_api_key
-from src.config import ACTIVE_MODEL_DIR, ACTIVE_MODEL_MANIFEST, MLFLOW_TRACKING_URI, PROJECT_ROOT, get_spark_session
+from src.config import ACTIVE_MODEL_DIR, ACTIVE_MODEL_MANIFEST, PROJECT_ROOT
+from src.serving.lightweight_scorer import LightweightModel
 
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -80,8 +87,9 @@ DRIFT_PSI = Gauge(
 # Env-configurable for a busier/quieter deployment.
 DRIFT_WINDOW_SECONDS = int(os.environ.get("DRIFT_WINDOW_SECONDS", "120"))
 
-_spark = None
-_model = None
+LIGHTWEIGHT_MODEL_PATH = ACTIVE_MODEL_DIR / "lightweight_model.json"
+
+_model = None  # a LightweightModel -- no SparkSession needed to serve requests
 
 
 class PredictRequest(BaseModel):
@@ -93,7 +101,7 @@ class PredictRequest(BaseModel):
 
 def _load_active_model():
     global _model
-    _model = mlflow.spark.load_model(str(ACTIVE_MODEL_DIR))
+    _model = LightweightModel(LIGHTWEIGHT_MODEL_PATH)
 
 
 def _set_active_model_version_gauge():
@@ -107,12 +115,9 @@ def _set_active_model_version_gauge():
 
 @app.on_event("startup")
 def load_model():
-    global _spark
-    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-    _spark = get_spark_session("api")
     _load_active_model()
     _set_active_model_version_gauge()
-    app_logger.info("Model loaded, Spark session started.")
+    app_logger.info("Lightweight model loaded (no Spark session needed).")
 
 
 @app.middleware("http")
@@ -199,14 +204,7 @@ def _combine(texts: List[str], titles: Optional[List[str]]) -> List[str]:
 
 
 def _score(review_texts: List[str]) -> List[dict]:
-    df = _spark.createDataFrame([(t,) for t in review_texts], ["review_text"])
-    predictions = _model.transform(df).select("review_text", "prediction", "probability").collect()
-    results = []
-    for row in predictions:
-        sentiment = "positive" if row["prediction"] == 1.0 else "negative"
-        probability = float(row["probability"][int(row["prediction"])])
-        results.append({"sentiment": sentiment, "probability": round(probability, 4)})
-    return results
+    return _model.score_batch(review_texts)
 
 
 @app.get("/health")

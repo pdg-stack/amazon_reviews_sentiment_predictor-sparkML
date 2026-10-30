@@ -45,6 +45,7 @@ from src.config import (
     REPORTS_DIR,
     get_spark_session,
 )
+from src.serving.export_lightweight_model import LIGHTWEIGHT_MODEL_PATH, export_from_model
 
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -93,6 +94,13 @@ def main(version: int, reload_api: bool = False, api_url: str = "http://localhos
     if ACTIVE_MODEL_DIR.exists():
         shutil.rmtree(ACTIVE_MODEL_DIR)
     mlflow.spark.save_model(spark_model, path=str(ACTIVE_MODEL_DIR))
+
+    # The API (src/api/app.py) scores requests via the Spark-free
+    # lightweight_scorer.py, not by loading this Spark-format model
+    # directly -- see export_lightweight_model.py's docstring for why.
+    # Reusing the already-loaded spark_model here avoids reloading it a
+    # second time just to export from it.
+    export_from_model(spark_model, LIGHTWEIGHT_MODEL_PATH)
 
     manifest = {
         "version": version,
