@@ -1,4 +1,4 @@
-# Splits the single .devcontainer image (see .devcontainer/Dockerfile) into
+# Splits the single docker/Dockerfile image into
 # independently-running services backed by a real standalone Spark cluster,
 # instead of each process running its own embedded local[*] Spark. Every
 # service below is built FROM THE SAME IMAGE/Dockerfile -- same pinned
@@ -6,17 +6,30 @@
 # to run the exact same version; a mismatched pyspark on the client talking
 # to this cluster will fail with serialization/protocol errors.
 #
+# `api` is NOT one of those clients, despite that framing above -- it used
+# to submit each /predict call as a Spark job (first to this cluster, then
+# earlier still to its own embedded local[*] session), but a real load test
+# found that collapsing well before 1,000 concurrent requests: every
+# request still paid Spark's fixed per-job overhead no matter how trivial
+# the actual computation was. It now scores requests via
+# src/serving/lightweight_scorer.py, a plain-Python reimplementation of the
+# trained model's own learned parameters -- no SparkSession, no cluster
+# connection, nothing Spark-version-pinned about it at all. Only `pipeline`
+# (training/batch jobs, where Spark's distributed execution genuinely
+# earns its overhead on millions of rows) is still a real client of this
+# cluster.
+#
 # Two different things are both called "Spark UI" -- don't conflate them:
 #   - Master UI (spark-master, port 8080): persistent, always up whenever
 #     spark-master is running, independent of any particular job. THIS is
 #     what makes "Spark UI" a genuinely independent, always-on service.
 #   - Driver/application UI (port 4040): only exists while a specific
-#     application's driver process is alive (api's long-lived SparkSession,
-#     or a one-off pipeline job) -- it's hosted by the driver itself, which
-#     is inherent to Spark's architecture and can't be fully separated out
-#     even with a cluster. Exposed on `api` (and available on `pipeline` via
-#     `--service-ports` since it's profile-gated) so it's reachable, but it
-#     is NOT a persistent/independent service the way the master UI is.
+#     application's driver process is alive -- today that's only a one-off
+#     `pipeline` job, never `api` (see above). It's hosted by the driver
+#     itself, which is inherent to Spark's architecture and can't be fully
+#     separated out even with a cluster. Available on `pipeline` via
+#     `--service-ports` (profile-gated, so not exposed by default) -- NOT a
+#     persistent/independent service the way the master UI is.
 #
 # The .devcontainer / VS Code workflow is untouched by any of this: it never
 # sets SPARK_MASTER_URL, so src/config.py's get_spark_session() keeps
@@ -39,7 +52,7 @@ services:
   spark-master:
     build:
       context: .
-      dockerfile: .devcontainer/Dockerfile
+      dockerfile: docker/Dockerfile
     image: amazon-reviews-sentiment:latest
     container_name: spark-master
     command: >
@@ -65,7 +78,7 @@ services:
   spark-worker:
     build:
       context: .
-      dockerfile: .devcontainer/Dockerfile
+      dockerfile: docker/Dockerfile
     image: amazon-reviews-sentiment:latest
     working_dir: /workspace
     command: >
@@ -86,60 +99,72 @@ services:
       - .:/workspace
 
   # MLflow UI -- browses run/metric/registry history from the bind-mounted
-  # mlruns/ (sqlite backend, see src/config.py MLFLOW_TRACKING_URI).
+  # models/mlruns/ (sqlite backend, see src/config.py MLFLOW_TRACKING_URI).
   mlflow-ui:
     build:
       context: .
-      dockerfile: .devcontainer/Dockerfile
+      dockerfile: docker/Dockerfile
     image: amazon-reviews-sentiment:latest
     container_name: mlflow-ui
     working_dir: /workspace
-    command: mlflow ui --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlruns/mlflow.db
+    command: mlflow ui --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///models/mlruns/mlflow.db
     ports:
       - "5000:5000"
     volumes:
       - .:/workspace
 
-  # FastAPI real-time serving layer -- a Spark *client* submitting to the
-  # cluster above, not an embedded local[*] session.
+  # FastAPI real-time serving layer. NOT a Spark client (see the top-of-file
+  # comment on why) -- scores /predict calls via
+  # src/serving/lightweight_scorer.py, reading the active model's exported
+  # parameters (models/active/lightweight_model.json) directly off the
+  # bind mount below. No SPARK_MASTER_URL, no depends_on the cluster, no
+  # driver UI port: there is no SparkSession in this process at all.
   api:
     build:
       context: .
-      dockerfile: .devcontainer/Dockerfile
+      dockerfile: docker/Dockerfile
     image: amazon-reviews-sentiment:latest
     container_name: api
     working_dir: /workspace
     command: uvicorn src.api.app:app --host 0.0.0.0 --port 8000
-    environment:
-      SPARK_MASTER_URL: spark://spark-master:7077
-      # Standalone Spark's default is "an app gets every available core,
-      # indefinitely" -- on a small cluster that means api's persistent
-      # SparkSession silently starves any concurrently-running `pipeline`
-      # job of executor resources (confirmed by testing: the pipeline job
-      # sat retrying "Initial job has not accepted any resources" forever
-      # while api was up). Capping api to 1 core leaves the rest of the
-      # cluster free. Raise this (and/or scale spark-worker) if you need
-      # api to handle more concurrent /predict load.
-      SPARK_CORES_MAX: "1"
-      # Every src/*.py script imports as `from src.config import ...` (an
-      # absolute import rooted at the repo root), which only resolves if
-      # /workspace itself is on sys.path. `uvicorn <module>:<app>` handles
-      # this itself (it prepends cwd to sys.path before importing), which is
-      # why `api` didn't strictly need this -- set here anyway for
-      # consistency/robustness. `pipeline` (below) DOES need it: plain
-      # `python src/train.py`-style invocations do NOT get cwd added to
-      # sys.path automatically (only the script's own directory, src/, is
-      # -- verified by testing; `python src/evaluate.py` fails with
-      # `ModuleNotFoundError: No module named 'src'` without this).
-      PYTHONPATH: /workspace
     env_file:
-      - .env  # provides API_KEY (python-dotenv also loads this at startup; both are belt-and-suspenders)
-    depends_on:
-      - spark-master
-      - spark-worker
+      - .env
+      - path: .env.aws  # cloud config (RDS/S3) -- optional, absent locally by default; see .env.aws
+        required: false
     ports:
       - "8000:8000"  # FastAPI
-      - "4040:4040"  # driver UI -- only live while a request is actively executing (see note above)
+    volumes:
+      - .:/workspace
+
+  # Web dashboard over logs/api_requests.log -- request counts, status-code
+  # breakdown, top paths, and response-time charts, via GoAccess. Its own
+  # small image (docker/log-viewer.Dockerfile), not the shared
+  # docker/Dockerfile -- GoAccess has nothing to do with the rest of
+  # this project's dependency set. src/scripts/tail_to_clf.py converts our JSON
+  # request log into Combined Log Format on the fly (GoAccess's most
+  # reliable input format -- see that script's docstring for why we don't
+  # feed it raw JSON directly). logs/api_probes.log (health/metrics hits)
+  # is intentionally not fed in here; it's just liveness/scrape traffic.
+  log-viewer:
+    build:
+      context: .
+      dockerfile: docker/log-viewer.Dockerfile
+    container_name: log-viewer
+    working_dir: /workspace
+    # Continuation lines MUST stay at this same indentation, not deeper --
+    # see docker-compose.cloud.yml's identical command block for why (a
+    # deeper-indented version of this exact block broke it there, confirmed
+    # by testing against the Phase 2 cloud deployment). --html-refresh=10:
+    # also confirmed there -- --real-time-html alone writes the HTML file
+    # ONCE at startup and leans on the WebSocket for every update after,
+    # so this is the fallback that keeps the file itself current even if a
+    # given browser's WebSocket connection isn't the one actually relied on.
+    command: >
+      sh -c "python3 src/scripts/tail_to_clf.py logs/api_requests.log |
+      goaccess --log-format=COMBINED -o /workspace/logs/log-viewer-report.html
+      --real-time-html --html-refresh=10 --port=7890 --addr=0.0.0.0 --no-global-config -"
+    ports:
+      - "8081:7890"
     volumes:
       - .:/workspace
 
@@ -148,15 +173,15 @@ services:
   # so it's excluded from a bare `docker compose up` and never auto-starts
   # or competes with the always-on UI/API containers for resources. Run
   # on-demand:
-  #   docker compose run --rm pipeline python src/train.py --sample-fraction 0.05
-  #   docker compose run --rm pipeline python src/evaluate.py --version 3
-  #   docker compose run --rm pipeline python src/preprocess.py
-  #   docker compose run --rm pipeline python src/data_download.py
-  #   docker compose run --rm pipeline python src/set_active_model.py --version 3
+  #   docker compose run --rm pipeline python src/pipeline/train.py --sample-fraction 0.05
+  #   docker compose run --rm pipeline python src/pipeline/evaluate.py --version 3
+  #   docker compose run --rm pipeline python src/pipeline/preprocess.py
+  #   docker compose run --rm pipeline python src/pipeline/data_download.py
+  #   docker compose run --rm pipeline python src/serving/set_active_model.py --version 3
   pipeline:
     build:
       context: .
-      dockerfile: .devcontainer/Dockerfile
+      dockerfile: docker/Dockerfile
     image: amazon-reviews-sentiment:latest
     working_dir: /workspace
     profiles:
@@ -164,12 +189,14 @@ services:
     environment:
       SPARK_MASTER_URL: spark://spark-master:7077
       # See the longer comment on `api`'s PYTHONPATH above -- required here
-      # so plain `python src/train.py`-style invocations (matching the
-      # README's documented command shape) can resolve `from src.config
+      # so plain `python src/pipeline/train.py`-style invocations (matching
+      # the README's documented command shape) can resolve `from src.config
       # import ...`.
       PYTHONPATH: /workspace
     env_file:
       - .env
+      - path: .env.aws  # cloud config (RDS/S3) -- optional, absent locally by default; see .env.aws
+        required: false
     depends_on:
       - spark-master
       - spark-worker

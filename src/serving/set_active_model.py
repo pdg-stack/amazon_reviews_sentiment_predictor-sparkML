@@ -1,0 +1,152 @@
+"""
+Explicitly activates ONE specific trained model version for local serving.
+
+Both the FastAPI app (src/api/app.py) and the batch CLI (src/serving/predict.py)
+load their model only from models/active/ -- this script is the only thing
+that ever writes to that directory. train.py only ever *registers* new
+versions in MLflow; it never touches models/active/. Switching versions is
+therefore always a deliberate, on-demand, auditable action:
+
+    python src/serving/set_active_model.py --version 3
+
+By default the running API does NOT pick this up automatically -- there is
+no background polling/hot-reload by design (see docs/ARCHITECTURE_NOTES.md). To set the
+active version AND have a currently-running API start serving it, in one
+command, add --reload-api:
+
+    python src/serving/set_active_model.py --version 3 --reload-api
+
+This calls the API's POST /admin/reload-model endpoint (added for exactly
+this) after activation. If the API isn't reachable (not running, wrong URL,
+etc.), that call just prints a warning -- activation itself still succeeds,
+you'd just need to start/restart the API manually to pick it up.
+"""
+
+import argparse
+import datetime
+import json
+import os
+import shutil
+import urllib.error
+import urllib.request
+
+import mlflow
+import mlflow.spark
+from dotenv import load_dotenv
+from mlflow.tracking import MlflowClient
+
+from src.config import (
+    ACTIVE_BASELINE_PATH,
+    ACTIVE_MODEL_DIR,
+    ACTIVE_MODEL_MANIFEST,
+    MLFLOW_MODEL_NAME,
+    MLFLOW_TRACKING_URI,
+    PROJECT_ROOT,
+    REPORTS_DIR,
+    get_spark_session,
+)
+from src.serving.export_lightweight_model import LIGHTWEIGHT_MODEL_PATH, export_from_model
+
+load_dotenv(PROJECT_ROOT / ".env")
+
+
+def _reload_running_api(api_url: str) -> None:
+    api_key = os.environ.get("API_KEY")
+    if not api_key:
+        print(
+            f"--reload-api: no API_KEY found in {PROJECT_ROOT / '.env'} -- "
+            "run src/scripts/generate_api_key.py first. Skipping API reload."
+        )
+        return
+
+    request = urllib.request.Request(
+        f"{api_url.rstrip('/')}/admin/reload-model",
+        method="POST",
+        headers={"X-API-Key": api_key},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            print(f"--reload-api: API reloaded -> {response.read().decode()}")
+    except (urllib.error.URLError, TimeoutError) as e:
+        print(
+            f"--reload-api: could not reach the API at {api_url} ({e}). "
+            "Activation still succeeded -- start/restart the API manually to pick it up."
+        )
+
+
+def main(version: int, reload_api: bool = False, api_url: str = "http://localhost:8000") -> None:
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    get_spark_session("set-active-model")  # mlflow's spark flavor needs a live SparkSession
+
+    client = MlflowClient()
+    model_version = client.get_model_version(MLFLOW_MODEL_NAME, str(version))
+    print(f"Activating '{MLFLOW_MODEL_NAME}' version {version} (run_id={model_version.run_id}) ...")
+
+    # mlflow.spark.load_model() on a "models:/name/N" registry alias checks
+    # whether the artifact is already reachable on Spark's distributed
+    # filesystem before loading it -- against a real cluster (not local[*])
+    # that check misfires and leaves an empty metadata directory behind
+    # (ValueError: RDD is empty; see the same fix in evaluate.py). Loading
+    # from model_version.source (the alias already resolved to its actual
+    # artifact path, via client.get_model_version() above) sidesteps it.
+    spark_model = mlflow.spark.load_model(model_version.source)
+
+    if ACTIVE_MODEL_DIR.exists():
+        shutil.rmtree(ACTIVE_MODEL_DIR)
+    mlflow.spark.save_model(spark_model, path=str(ACTIVE_MODEL_DIR))
+
+    # The API (src/api/app.py) scores requests via the Spark-free
+    # lightweight_scorer.py, not by loading this Spark-format model
+    # directly -- see export_lightweight_model.py's docstring for why.
+    # Reusing the already-loaded spark_model here avoids reloading it a
+    # second time just to export from it.
+    export_from_model(spark_model, LIGHTWEIGHT_MODEL_PATH)
+
+    manifest = {
+        "version": version,
+        "run_id": model_version.run_id,
+        "activated_at": datetime.datetime.now().isoformat(),
+    }
+    ACTIVE_MODEL_MANIFEST.write_text(json.dumps(manifest, indent=2))
+
+    # Copies this version's drift baseline (written by evaluate.py) so
+    # models/active/BASELINE_STATS.json always matches whichever model is
+    # actually being served -- see src/api/drift.py.
+    baseline_src = REPORTS_DIR / f"version_{version}" / "baseline_stats.json"
+    if baseline_src.exists():
+        shutil.copy(baseline_src, ACTIVE_BASELINE_PATH)
+        print(f"Drift baseline copied from {baseline_src}.")
+    else:
+        if ACTIVE_BASELINE_PATH.exists():
+            ACTIVE_BASELINE_PATH.unlink()
+        print(
+            f"No baseline_stats.json found for version {version} -- run "
+            f"`python src/pipeline/evaluate.py --version {version}` first if you want the API's "
+            "automated drift check to work for this version. It will report 'unavailable' until then."
+        )
+
+    print(f"models/active/ now serves version {version}.")
+
+    if reload_api:
+        _reload_running_api(api_url)
+    else:
+        print("Restart the API (or re-run predict.py) to pick this up, or rerun with --reload-api.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--version", type=int, required=True, help="Registered model version to activate."
+    )
+    parser.add_argument(
+        "--reload-api",
+        action="store_true",
+        help="Also call a running API's /admin/reload-model so it picks up this version immediately.",
+    )
+    parser.add_argument(
+        "--api-url",
+        default="http://localhost:8000",
+        help="Base URL of the running API, used only with --reload-api (default: http://localhost:8000).",
+    )
+    args = parser.parse_args()
+    main(version=args.version, reload_api=args.reload_api, api_url=args.api_url)

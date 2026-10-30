@@ -3,21 +3,34 @@ FastAPI real-time serving layer.
 
     POST /predict             (requires X-API-Key) -> {"sentiment": ..., "probability": ...}
     POST /admin/reload-model  (requires X-API-Key) -> reloads models/active/ into memory, no restart needed
-    GET  /admin/drift-report  (requires X-API-Key) -> latest automated drift check (see src/api/drift.py)
+    GET  /admin/drift-report  (requires X-API-Key) -> computes a fresh drift check now (see src/api/drift.py)
     GET  /health               (no auth)            -> {"status": "ok"}
     GET  /metrics               (no auth)            -> Prometheus text exposition
 
-Loads models/active/ (set by set_active_model.py) at startup and keeps the
-SparkSession resident for the life of the process -- fine for demo/dev
-latency, not a high-throughput production pattern (see docs/ARCHITECTURE_NOTES.md).
+Loads models/active/lightweight_model.json (exported from models/active/ by
+set_active_model.py, see src/serving/export_lightweight_model.py) at
+startup and scores every /predict call with src/serving/lightweight_scorer.py
+-- no SparkSession involved in serving at all. A load test against an
+earlier version of this API, which DID keep an embedded SparkSession
+resident and score every request through it, found that path collapsing
+well before 1,000 concurrent requests (see docs/DEPLOYMENT.md):
+each request still paid Spark's fixed per-job overhead regardless of how
+little actual computation it needed. Batch scoring (predict.py, scoring
+millions of rows in one job) is a genuinely different workload shape and
+still uses real Spark -- see that script.
 
-Every request (except /health and /metrics, to avoid liveness/scrape spam)
-is logged as one JSON line to logs/api_requests.log via the log_requests
-middleware below; /predict calls carry extra detail (input/results/lengths)
-and are tagged "event": "predict" so src/api/drift.py can read them back.
-A background task (started at startup) periodically compares recent
-/predict traffic against a baseline captured at evaluation time -- see
-docs/OBSERVABILITY.md for the full design.
+Every request is logged as one JSON line (including client_ip/user_agent),
+via the log_requests middleware below. GET /health and GET /metrics
+(liveness checks / Prometheus scrapes) go to logs/api_probes.log; everything
+else goes to logs/api_requests.log. /predict calls carry extra detail
+(input/results/lengths) and are tagged "event": "predict"; a failed
+/predict call (400/401) still logs the input that was sent, just without
+results. Every successful /predict call also writes one row per scored text
+to the `app.predictions` table (src/api/db.py) when APP_DB_HOST is
+configured (a cloud deployment) -- a no-op locally. GET /admin/drift-report
+computes a fresh check against that table on demand (no internal loop --
+see docs/OBSERVABILITY.md); an external scheduler (EventBridge Scheduler in
+the cloud) calls it on a cadence, not this process.
 
 The model expects a `review_text` field (title + body combined, see
 preprocess.py/docs/model_plan.md) -- /predict accepts an optional `title`/`titles`
@@ -28,24 +41,24 @@ Run with:
     uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --reload
 """
 
-import asyncio
+import datetime
+import hashlib
 import json
 import os
 import time
 from typing import List, Optional, Union
 
-import mlflow
-import mlflow.spark
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
 from prometheus_client import Gauge
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
-from src.api import drift
-from src.api.logging_config import app_logger, request_logger
+from src.api import db, drift
+from src.api.logging_config import app_logger, probe_logger, request_logger
 from src.api.security import require_api_key
-from src.config import ACTIVE_MODEL_DIR, ACTIVE_MODEL_MANIFEST, MLFLOW_TRACKING_URI, PROJECT_ROOT, get_spark_session
+from src.config import ACTIVE_MODEL_DIR, ACTIVE_MODEL_MANIFEST, PROJECT_ROOT
+from src.serving.lightweight_scorer import LightweightModel
 
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -65,15 +78,18 @@ DRIFT_PSI = Gauge(
     "prediction_drift_psi", "Latest Population Stability Index score per drift signal", ["feature"]
 )
 
-# Env-configurable so a low-traffic dev instance and a busier one can each
-# pick a sensible cadence/window without code changes -- see docs/OBSERVABILITY.md.
-DRIFT_CHECK_INTERVAL_SECONDS = int(os.environ.get("DRIFT_CHECK_INTERVAL_SECONDS", "900"))
-DRIFT_WINDOW_SECONDS = int(os.environ.get("DRIFT_WINDOW_SECONDS", "3600"))
+# How far back GET /admin/drift-report looks each time it's called -- 120s
+# (2 min) matches the cadence an external scheduler (EventBridge Scheduler
+# in the cloud) calls it at, so each check's window lines up with the gap
+# since the last one. At this cadence MIN_SAMPLE_SIZE (drift.py, 30) needs
+# roughly 15+ predictions/minute of sustained traffic to clear at all --
+# below that, most checks report "insufficient_data" rather than a verdict.
+# Env-configurable for a busier/quieter deployment.
+DRIFT_WINDOW_SECONDS = int(os.environ.get("DRIFT_WINDOW_SECONDS", "120"))
 
-_spark = None
-_model = None
-_latest_drift_report: dict = {"status": "not_yet_computed"}
-_drift_task: Optional["asyncio.Task"] = None
+LIGHTWEIGHT_MODEL_PATH = ACTIVE_MODEL_DIR / "lightweight_model.json"
+
+_model = None  # a LightweightModel -- no SparkSession needed to serve requests
 
 
 class PredictRequest(BaseModel):
@@ -85,7 +101,7 @@ class PredictRequest(BaseModel):
 
 def _load_active_model():
     global _model
-    _model = mlflow.spark.load_model(str(ACTIVE_MODEL_DIR))
+    _model = LightweightModel(LIGHTWEIGHT_MODEL_PATH)
 
 
 def _set_active_model_version_gauge():
@@ -97,78 +113,70 @@ def _set_active_model_version_gauge():
         ACTIVE_MODEL_VERSION.set(version)
 
 
-async def _run_drift_check_and_record():
-    global _latest_drift_report
-    try:
-        # run_drift_check() does synchronous file I/O (tailing the request
-        # log); offloaded to a thread so it never blocks the event loop that
-        # concurrent /predict requests are running on.
-        report = await asyncio.to_thread(drift.run_drift_check, DRIFT_WINDOW_SECONDS)
-    except Exception:
-        app_logger.exception("Drift check failed")
-        return
-    _latest_drift_report = report
-    for feature, score in report.get("metrics", {}).items():
-        DRIFT_PSI.labels(feature=feature).set(score)
-    if report.get("status") in ("warning", "alert"):
-        app_logger.warning(f"Model drift detected: {report}")
-
-
-async def _drift_loop():
-    await _run_drift_check_and_record()  # first check right away, not after the first interval
-    while True:
-        await asyncio.sleep(DRIFT_CHECK_INTERVAL_SECONDS)
-        await _run_drift_check_and_record()
-
-
 @app.on_event("startup")
 def load_model():
-    global _spark
-    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-    _spark = get_spark_session("api")
     _load_active_model()
     _set_active_model_version_gauge()
-    app_logger.info("Model loaded, Spark session started.")
-
-
-@app.on_event("startup")
-async def start_drift_loop():
-    global _drift_task
-    _drift_task = asyncio.create_task(_drift_loop())
-
-
-@app.on_event("shutdown")
-async def stop_drift_loop():
-    if _drift_task is not None:
-        _drift_task.cancel()
+    app_logger.info("Lightweight model loaded (no Spark session needed).")
 
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start = time.time()
+
+    # Captured up front so it's available even if the request fails before
+    # predict() ever runs (e.g. a bad API key, rejected by the require_api_key
+    # dependency) -- Starlette caches the body bytes, so the handler can still
+    # read the same body normally afterward.
+    raw_input = None
+    if request.method == "POST" and request.url.path == "/predict":
+        try:
+            raw_input = json.loads(await request.body())
+        except Exception:
+            raw_input = None
+
+    client_ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+    api_key_id = _api_key_id(request)
+
     try:
         response = await call_next(request)
     except Exception:
         latency_ms = round((time.time() - start) * 1000, 2)
-        request_logger.info(
-            json.dumps(
-                {
-                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    "event": "access",
-                    "method": request.method,
-                    "path": request.url.path,
-                    "status": 500,
-                    "latency_ms": latency_ms,
-                }
-            )
-        )
+        entry = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "event": "access",
+            "method": request.method,
+            "path": request.url.path,
+            "status": 500,
+            "latency_ms": latency_ms,
+            "client_ip": client_ip,
+            "user_agent": user_agent,
+            "api_key_id": api_key_id,
+        }
+        if raw_input is not None:
+            entry["input"] = raw_input
+        request_logger.info(json.dumps(entry))
         app_logger.exception(f"Unhandled exception on {request.method} {request.url.path}")
         raise  # re-raise, never swallow -- ServerErrorMiddleware (above us) still needs this to produce the client's 500
 
-    if request.url.path in ("/health", "/metrics"):
-        return response  # liveness probes / scrapes would otherwise flood the log and the drift window
-
     latency_ms = round((time.time() - start) * 1000, 2)
+
+    if request.url.path in ("/health", "/metrics"):
+        probe_logger.info(
+            json.dumps(
+                {
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": response.status_code,
+                    "latency_ms": latency_ms,
+                    "client_ip": client_ip,
+                }
+            )
+        )
+        return response
+
     predict_detail = getattr(request.state, "predict_detail", None)
     entry = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -177,11 +185,30 @@ async def log_requests(request: Request, call_next):
         "path": request.url.path,
         "status": response.status_code,
         "latency_ms": latency_ms,
+        "client_ip": client_ip,
+        "user_agent": user_agent,
+        "api_key_id": api_key_id,
     }
     if predict_detail:
         entry.update(predict_detail)
+    elif response.status_code >= 400 and raw_input is not None:
+        # A failed /predict call (bad payload, bad key) never reaches the
+        # point where predict() sets predict_detail -- still record what was
+        # sent so a 400/401 entry shows why, not just that it happened.
+        entry["input"] = raw_input
     request_logger.info(json.dumps(entry))
     return response
+
+
+def _api_key_id(request: Request) -> Optional[str]:
+    # A short, non-reversible fingerprint of the caller's key, not the key
+    # itself -- lets logs/the predictions table distinguish simulated
+    # callers from each other without ever persisting a real credential.
+    # Deliberately computed from whatever was sent, valid or not: a missing/
+    # wrong key still gets an id, so even rejected 401s are attributable to
+    # a consistent (if bogus) caller identity, same as a valid one.
+    api_key = request.headers.get("x-api-key")
+    return hashlib.sha256(api_key.encode()).hexdigest()[:8] if api_key else None
 
 
 def _combine(texts: List[str], titles: Optional[List[str]]) -> List[str]:
@@ -191,14 +218,7 @@ def _combine(texts: List[str], titles: Optional[List[str]]) -> List[str]:
 
 
 def _score(review_texts: List[str]) -> List[dict]:
-    df = _spark.createDataFrame([(t,) for t in review_texts], ["review_text"])
-    predictions = _model.transform(df).select("review_text", "prediction", "probability").collect()
-    results = []
-    for row in predictions:
-        sentiment = "positive" if row["prediction"] == 1.0 else "negative"
-        probability = float(row["probability"][int(row["prediction"])])
-        results.append({"sentiment": sentiment, "probability": round(probability, 4)})
-    return results
+    return _model.score_batch(review_texts)
 
 
 @app.get("/health")
@@ -206,8 +226,16 @@ def health():
     return {"status": "ok"}
 
 
+def _active_model_identity() -> tuple[Optional[int], Optional[str]]:
+    if not ACTIVE_MODEL_MANIFEST.exists():
+        return None, None
+    manifest = json.loads(ACTIVE_MODEL_MANIFEST.read_text())
+    return manifest.get("version"), manifest.get("run_id")
+
+
 @app.post("/predict", dependencies=[Depends(require_api_key)])
 def predict(payload: PredictRequest, request: Request) -> Union[dict, List[dict]]:
+    received_at = datetime.datetime.utcnow()
     if payload.text is None and not payload.texts:
         raise HTTPException(status_code=400, detail="Provide either 'text' or 'texts'.")
 
@@ -218,6 +246,7 @@ def predict(payload: PredictRequest, request: Request) -> Union[dict, List[dict]
 
     review_texts = _combine(texts, titles)
     results = _score(review_texts)
+    responded_at = datetime.datetime.utcnow()
 
     # Stashed on request.state rather than written to a file here -- the
     # log_requests middleware above picks this up after call_next() returns
@@ -231,6 +260,32 @@ def predict(payload: PredictRequest, request: Request) -> Union[dict, List[dict]
         # raw pre-combine text/title above, which drift.py never reads.
         "review_text_lengths": [len(rt.split()) for rt in review_texts],
     }
+
+    # One app.predictions row per text scored (a batch call scores several
+    # texts in one request, so one API call can write several rows) -- a
+    # no-op locally where APP_DB_HOST isn't set.
+    api_key_id = _api_key_id(request)
+    client_ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+    model_version, run_id = _active_model_identity()
+    titles_for_rows = titles if titles is not None else [None] * len(texts)
+    # review_text stored here is the COMBINED text (title + body) -- what was
+    # actually scored, matching drift.py's word-count expectations -- not the
+    # raw pre-combine `texts` input above.
+    for title, combined_text, result in zip(titles_for_rows, review_texts, results):
+        db.insert_prediction(
+            review_title=title,
+            review_text=combined_text,
+            sentiment=result["sentiment"],
+            probability=result["probability"],
+            client_ip=client_ip,
+            user_agent=user_agent,
+            api_key_id=api_key_id,
+            received_at=received_at,
+            responded_at=responded_at,
+            model_version=model_version,
+            run_id=run_id,
+        )
 
     return results[0] if payload.texts is None else results
 
@@ -253,8 +308,17 @@ def reload_model():
 @app.get("/admin/drift-report", dependencies=[Depends(require_api_key)])
 def drift_report():
     """
-    Latest result from the background drift-check loop (see
-    src/api/drift.py and docs/OBSERVABILITY.md) -- not computed on demand,
-    just returns whatever the last scheduled check found.
+    Computes a fresh drift check right now, against the last
+    DRIFT_WINDOW_SECONDS of app.predictions (see src/api/drift.py), saves
+    the result to app.drift_checks, and returns it. No internal loop -- an
+    external scheduler (EventBridge Scheduler, every 2 min in the cloud)
+    is what calls this on a cadence; Grafana then reads app.drift_checks on
+    demand whenever the dashboard is viewed, not this endpoint directly.
     """
-    return _latest_drift_report
+    report = drift.run_drift_check(DRIFT_WINDOW_SECONDS)
+    db.insert_drift_check(report)
+    for feature, score in report.get("metrics", {}).items():
+        DRIFT_PSI.labels(feature=feature).set(score)
+    if report.get("status") in ("warning", "alert"):
+        app_logger.warning(f"Model drift detected: {report}")
+    return report

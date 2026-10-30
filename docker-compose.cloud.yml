@@ -1,0 +1,141 @@
+# Phase 2/3 cloud serving stack -- runs on the EC2 instance provisioned in
+# infra/ec2.tf, NOT locally. No spark-master/spark-worker/pipeline here
+# (EMR Serverless handles training, Phase 1) -- api runs NO Spark at all
+# (it used to run its own embedded local[*] session, same as
+# .devcontainer/local dev, but a real load test showed that collapsing
+# well before 1,000 concurrent requests). It scores requests via
+# src/serving/lightweight_scorer.py instead, reading the active model's
+# exported parameters off the bind mount below -- see that module's
+# docstring and docs/ARCHITECTURE_NOTES.md's "Cloud deployment" section for why.
+#
+# Phase 4: api/log-viewer are pre-built images from ECR (GitHub Actions
+# builds + pushes on merge to main, see .github/workflows/deploy.yml and
+# infra/cicd.tf) -- this instance only ever `docker compose pull`s them,
+# never builds locally. `aws ecr get-login-password | docker login` first
+# (the deploy workflow's own SSM command does this); the instance's IAM
+# role already has the needed ecr:* pull permissions (ec2.tf).
+#
+# Env comes from .env + .env.aws (same files/convention as local dev's
+# optional .env.aws -- see docker-compose.yml's own comment on that).
+# AWS_ACCOUNT_ID/AWS_REGION below are read from .env (compose's own
+# variable-substitution file, auto-loaded -- not .env.aws, which only
+# reaches containers via env_file:, never substitution at this level).
+
+services:
+  api:
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/arsp-api:latest
+    container_name: api
+    working_dir: /workspace
+    command: uvicorn src.api.app:app --host 0.0.0.0 --port 8000
+    env_file:
+      - .env
+      - .env.aws
+    restart: unless-stopped
+    # The image itself has no src/ -- docker/Dockerfile relies on the repo
+    # being bind-mounted over /workspace at runtime (same as docker-compose.yml's
+    # local dev services), not baked in at build time.
+    volumes:
+      - .:/workspace
+
+  mlflow-ui:
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/arsp-api:latest
+    container_name: mlflow-ui
+    working_dir: /workspace
+    # --static-prefix: see docker/nginx.conf's /mlflow/ location comment.
+    # --allowed-hosts: mlflow 3.x rejects any request whose Host header isn't
+    # localhost/a private IP by default (DNS-rebinding protection) -- CloudFront
+    # forwards its own domain as Host, not the viewer's, so without this every
+    # request arriving through CloudFront gets a 403. CLOUDFRONT_DOMAIN comes
+    # from .env.aws since it changes if the distribution is ever recreated
+    # (see infra/edge.tf's cloudfront_domain output) -- $$ escapes the compose
+    # YAML's own variable substitution so the container's shell expands it
+    # from the env_file below, not tofu/compose at parse time.
+    command: >
+      sh -c "mlflow ui --host 0.0.0.0 --port 5000 --static-prefix /mlflow
+      --allowed-hosts localhost,$$CLOUDFRONT_DOMAIN"
+    env_file:
+      - .env.aws  # MLFLOW_TRACKING_URI (RDS), CLOUDFRONT_DOMAIN
+    restart: unless-stopped
+
+  log-viewer:
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/arsp-log-viewer:latest
+    container_name: log-viewer
+    working_dir: /workspace
+    # NOT --real-time-html here (unlike docker-compose.yml's local service,
+    # where it's correct) -- that mode only ever rewrites its output file in
+    # response to a connected WebSocket client. Locally, a browser hits
+    # GoAccess's own embedded httpd directly, so the WebSocket genuinely
+    # connects. Here, nginx serves log-viewer-report.html as a plain static
+    # file instead of proxying to that httpd (GoAccess's embedded server
+    # rejects plain page loads outright -- see docker/nginx.conf's /logs/
+    # comment), so no WebSocket client ever connects, and --html-refresh
+    # (which only triggers the browser-side auto-reload, not a server-side
+    # rewrite) can't fix that either -- confirmed directly: the file sat
+    # byte-for-byte unchanged through an entire live load test's worth of
+    # real traffic, not just at idle.
+    #
+    # Instead: a plain loop re-renders the whole report from scratch every
+    # 15s, in one-shot (non-real-time) GoAccess batch mode -- no WebSocket
+    # involved at all, so nothing needs one to connect. tail_to_clf.py
+    # --once reads whatever's currently in the log and exits, rather than
+    # following it forever. Continuation lines must stay at this exact
+    # indentation (see docker-compose.yml's identical warning on why a
+    # deeper indent breaks this).
+    command: >
+      sh -c "while true; do
+      python3 src/scripts/tail_to_clf.py --once logs/api_requests.log |
+      goaccess --log-format=COMBINED -o /workspace/logs/log-viewer-report.html --no-global-config -;
+      sleep 15;
+      done"
+    restart: unless-stopped
+    volumes:
+      - .:/workspace
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: grafana
+    restart: unless-stopped
+    # %(domain)s/%(protocol)s in GF_SERVER_ROOT_URL are filled from Grafana's
+    # OWN server.domain/server.protocol config, not inferred from the
+    # incoming request -- those default to localhost/http, so Grafana was
+    # redirecting every request to http://localhost/grafana/, unreachable
+    # from outside the instance. GF_SERVER_PROTOCOL also controls what
+    # protocol Grafana's OWN listener speaks, not just the redirect URL's
+    # text -- setting it to https switched the listener into TLS-only mode,
+    # which nginx (plain HTTP to this internal hop; CloudFront already
+    # terminates TLS at the edge) can't talk to, hence a 400 from nginx.
+    # Building the full root_url as a plain literal (no %(...)s template,
+    # no touching GF_SERVER_PROTOCOL) sidesteps both problems: Grafana's
+    # listener stays on its default http, external links are still https.
+    entrypoint: ["sh", "-c"]
+    command:
+      - export GF_SERVER_ROOT_URL="https://$$CLOUDFRONT_DOMAIN/grafana/" && exec /run.sh
+    environment:
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      # RDS `app` schema is the one and only datasource (provisioned below) --
+      # no separate login flow needed for a single-operator dashboard.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+    env_file:
+      - .env.aws  # APP_DB_*, CLOUDFRONT_DOMAIN
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - grafana-data:/var/lib/grafana
+
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./logs:/workspace/logs:ro # log-viewer-report.html -- see nginx.conf's /logs/ comment
+    depends_on:
+      - api
+      - mlflow-ui
+      - log-viewer
+      - grafana
+
+volumes:
+  grafana-data:

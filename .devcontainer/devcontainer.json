@@ -1,7 +1,8 @@
 {
   "name": "amazon-reviews-sentiment-predictor-sparkml",
   "build": {
-    "dockerfile": "Dockerfile"
+    "dockerfile": "../docker/Dockerfile",
+    "context": ".."
   },
   "mounts": [
     "source=${localWorkspaceFolder}/.kaggle,target=/root/.kaggle,type=bind"
