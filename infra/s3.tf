@@ -1,5 +1,9 @@
 resource "aws_s3_bucket" "main" {
   bucket = "${var.project_prefix}-${var.aws_account_id}-${var.aws_region}"
+
+  # POC project: a `tofu destroy` should be able to tear this down in one
+  # shot, not get blocked on emptying it by hand first.
+  force_destroy = true
 }
 
 resource "aws_s3_bucket_public_access_block" "main" {
