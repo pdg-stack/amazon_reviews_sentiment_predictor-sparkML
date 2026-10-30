@@ -25,10 +25,23 @@ data "aws_iam_policy_document" "github_actions_trust" {
       variable = "token.actions.githubusercontent.com:aud"
       values   = ["sts.amazonaws.com"]
     }
+    # StringLike, not StringEquals: GitHub's "immutable subject claims" repo
+    # setting (on by default for this repo, confirmed via GET
+    # /repos/{owner}/{repo}/actions/oidc/customization/sub) changes the real
+    # sub claim to "repo:OWNER@ORG_ID/REPO@REPO_ID:ref:...", not the plain
+    # "repo:OWNER/REPO:ref:..." this condition used to check for -- every
+    # token GitHub actually issues failed a StringEquals match against the
+    # plain form (confirmed via CloudTrail: AccessDenied on every attempt).
+    # Matching both forms, rather than hardcoding this account's numeric
+    # org/repo IDs, keeps this working regardless of which form a given
+    # token uses.
     condition {
-      test     = "StringEquals"
+      test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repo}:ref:refs/heads/main"]
+      values = [
+        "repo:${var.github_repo}:ref:refs/heads/main",
+        "repo:${split("/", var.github_repo)[0]}@*/${split("/", var.github_repo)[1]}@*:ref:refs/heads/main",
+      ]
     }
   }
 }
